@@ -1,0 +1,24 @@
+services:
+  mypanel:
+    image: ghcr.io/fanling1970/mypanel:latest
+    container_name: mypanel
+    privileged: true          # 管理 Docker 需要特权模式，不能去掉
+    pid: host                 # 让"端口占用扫描"能读取宿主监听端口（bridge 网络也能用）
+    ports:
+      - "8383:8383"           # 宿主机端口:容器内端口 —— 改动左边数字即可（如 54321:8383）
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./mypanel-data:/data                          # 数据目录（本项目目录下，方便查看/备份）
+      - /etc/docker/daemon.json:/etc/docker/daemon.json   # 镜像加速器设置（可读写，面板内配置）
+      # 下面两个挂载是给面板的"Compose 项目浏览/新建"功能用的（可选，不用可删除）：
+      # 京东云雅典娜 RE-CS-02 的 Docker 根目录在 /mnt/mmcblk0p27/docker，
+      # 数据分区根为 /mnt/mmcblk0p27；如与你路由器实际路径不同，改 ${COMPOSE_ROOT:-...} / ${COMPOSE_VOLUME_ROOT:-...} 默认值即可。
+      - ${COMPOSE_ROOT:-/mnt/mmcblk0p27/docker}:/host/compose
+      - ${COMPOSE_VOLUME_ROOT:-/mnt/mmcblk0p27}:/host-vol1
+    environment:
+      - TZ=Asia/Shanghai
+      - DB_PATH=/data/mypanel.db
+      - APP_PORT=8383         # 容器内监听端口，与 ports 右边保持一致
+      - COMPOSE_ROOT_HOST=${COMPOSE_ROOT:-/mnt/mmcblk0p27/docker}
+      - COMPOSE_VOLUME_ROOT_HOST=${COMPOSE_VOLUME_ROOT:-/mnt/mmcblk0p27}
+    restart: unless-stopped

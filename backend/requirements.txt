@@ -1,0 +1,10 @@
+aiofiles==24.1.0
+aiosqlite==0.20.0
+apscheduler==3.10.4
+docker==7.1.0
+fastapi==0.115.0
+python-multipart==0.0.9
+pyotp==2.9.0
+qrcode==7.4.2
+requests==2.32.3
+uvicorn==0.30.6
