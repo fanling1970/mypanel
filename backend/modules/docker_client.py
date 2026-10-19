@@ -239,6 +239,24 @@ def get_client() -> docker.DockerClient:
     return _client
 
 
+def _stats_one_shot(c):
+    """只取一帧容器统计（内存/网络/磁盘这类瞬时量足够）。
+
+    docker stats(stream=False) 默认必须等两帧才能算出 CPU 差值，
+    单次就要 1~2 秒；只关心内存时用 one_shot=True 取一帧，几十毫秒返回。
+    老版本 Docker API（< 1.41）不支持 one_shot，自动回退到两帧采样。
+    """
+    try:
+        return c.stats(stream=False, one_shot=True)
+    except TypeError:
+        # docker-py 版本过老，没有 one_shot 参数
+        return c.stats(stream=False)
+    except Exception as e:
+        # InvalidVersion 等：回退标准两帧采样
+        logger.debug(f"one_shot stats 不可用，回退两帧采样: {e}")
+        return c.stats(stream=False)
+
+
 def _parse_container_ports(c) -> list[str]:
     """解析容器端口映射为 ['0.0.0.0:8080->80/tcp', ...]（仅 IPv4，过滤 IPv6 双栈重复项）"""
     ports = []
@@ -1025,7 +1043,9 @@ def cleanup_unused_images() -> dict:
     used_image_ids = set()
     for c in containers:
         try:
-            used_image_ids.add(c.image.id)
+            _iid = c.attrs.get("Image") or ""
+            if _iid:
+                used_image_ids.add(_iid)
         except Exception:
             pass
 
@@ -1110,11 +1130,9 @@ def list_compose_projects() -> list[dict]:
             if service:
                 p["services"].add(service)
 
-            try:
-                image_tags = c.image.tags if c.image and c.image.tags else []
-                image_name = image_tags[0] if image_tags else (c.image.id[:12] if c.image else "")
-            except Exception:
-                image_name = c.attrs.get("Config", {}).get("Image", "")[:30] or "unknown"
+            # 直接读 attrs 里的镜像名。c.image.tags 会为每个容器触发一次镜像 inspect，
+            # 17 个容器 ≈ 17 次额外 Docker API 往返，是 Compose 页几秒延迟的主因。
+            image_name = (c.attrs.get("Config", {}).get("Image") or "")[:60] or "unknown"
             if image_name:
                 p["images"].add(image_name)
 
@@ -1573,10 +1591,19 @@ def get_compose_project_stats(project_name: str) -> Optional[dict]:
     total_block_write = 0
     total_pids = 0
 
-    for c in running_containers:
+    # 并发采样：原先逐个容器串行 stats(stream=False)，每个 1~2 秒，
+    # 项目里有 N 个容器就要付 N 倍时间；并发后总耗时≈单个容器。
+    def _sample(c):
         try:
-            stats = c.stats(stream=False)
+            return c.stats(stream=False)
         except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(8, len(running_containers))) as _pool:
+        _all_stats = list(_pool.map(_sample, running_containers))
+
+    for stats in _all_stats:
+        if not stats:
             continue
 
         # CPU
@@ -1653,7 +1680,7 @@ def get_all_compose_memory() -> dict:
     def _fetch_mem(item) -> tuple:
         project, c = item
         try:
-            s = c.stats(stream=False)
+            s = _stats_one_shot(c)
             if isinstance(s, dict):
                 mem = s.get("memory_stats", {}).get("usage", 0) or 0
             else:

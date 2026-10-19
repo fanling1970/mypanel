@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3-mypanel"
+APP_VERSION = "2.7.3.001"
 
 import asyncio
 import json
@@ -82,9 +82,27 @@ def _build_compose_stats() -> dict:
     return {"success": True, "data": docker_client.get_all_compose_memory()}
 
 
+def _build_images() -> dict:
+    return {"success": True, "data": docker_client.list_images()}
+
+
+def _build_compose_projects() -> dict:
+    return {"success": True, "data": docker_client.list_compose_projects()}
+
+
 _SWR_PRODUCERS = {
     "containers_stats": _build_containers_stats,
     "compose_stats": _build_compose_stats,
+    "images": _build_images,
+    "compose_projects": _build_compose_projects,
+}
+
+# 各 key 对应的缓存 TTL（决定"多旧算过期"，过期仍会先返回旧值再后台刷新）
+_SWR_TTLS = {
+    "containers_stats": CACHE_TTL_STATS,
+    "compose_stats": CACHE_TTL_COMPOSE_STATS,
+    "images": CACHE_TTL_LIST,
+    "compose_projects": CACHE_TTL_LIST,
 }
 
 
@@ -102,7 +120,7 @@ def _swr_refresh(key: str) -> None:
         t0 = time.monotonic()
         try:
             val = producer()
-            ttl = CACHE_TTL_COMPOSE_STATS if key == "compose_stats" else CACHE_TTL_STATS
+            ttl = _SWR_TTLS.get(key, CACHE_TTL_STATS)
             cache.set(key, val, ttl)
             _last_ms[key] = round((time.monotonic() - t0) * 1000)
         except Exception as e:
@@ -307,7 +325,9 @@ async def lifespan(app: FastAPI):
     try:
         _swr_refresh("containers_stats")
         _swr_refresh("compose_stats")
-        logger.info("已触发 stats 缓存预热（后台线程）")
+        _swr_refresh("images")
+        _swr_refresh("compose_projects")
+        logger.info("已触发缓存预热（后台线程）：stats / compose_stats / images / compose_projects")
     except Exception as e:
         logger.warning(f"stats 预热失败: {e}")
 
@@ -575,6 +595,7 @@ async def debug_perf():
     - last_task_ms 显示 stats / compose_stats 的真实重算耗时
     """
     return {
+        "version": APP_VERSION,
         "build_commit": BUILD_COMMIT,
         "cache": cache.stats(),
         "last_task_ms": dict(_last_ms),
@@ -1231,10 +1252,17 @@ async def get_container_logs_api(container_id: str, tail: int = Query(default=20
 # ============ 镜像管理 API ============
 
 @app.get("/api/images")
-async def list_images():
-    """获取所有镜像列表（30 秒缓存）"""
-    cached = cache.get("images")
-    if cached is not None:
+async def list_images(force: bool = Query(default=False)):
+    """获取所有镜像列表（stale-while-revalidate）
+
+    默认立刻返回上一次快照，超过 8 秒后台重算；force=true 时同步重算（供"刷新"按钮）。
+    """
+    if force:
+        cache.invalidate("images")
+    cached, age = cache.get_stale("images", SWR_MAX_AGE)
+    if cached is not None and not force:
+        if age >= SWR_REFRESH_AFTER:
+            _swr_refresh("images")
         return cached
     try:
         images = await asyncio.to_thread(docker_client.list_images)
@@ -1250,6 +1278,7 @@ async def list_images():
 async def delete_image(image_id: str, force: bool = Query(default=False)):
     """删除指定镜像"""
     result = await asyncio.to_thread(docker_client.delete_image, image_id, force)
+    cache.invalidate("images", "containers", "containers_stats")
     # 记录执行日志
     await db.add_schedule_log(
         schedule_id=0, schedule_name="手动操作",
@@ -1267,6 +1296,7 @@ async def delete_image(image_id: str, force: bool = Query(default=False)):
 async def cleanup_unused_images():
     """清理所有未使用镜像和无Tag镜像"""
     result = await asyncio.to_thread(docker_client.cleanup_unused_images)
+    cache.invalidate("images", "containers", "containers_stats")
     # 记录执行日志
     status = "success" if result.get("success") else "failed"
     message = result.get("message", "")
@@ -1387,10 +1417,17 @@ async def delete_compose_project(target: str = Query(..., description="项目目
 
 
 @app.get("/api/compose/projects")
-async def list_compose_projects():
-    """列出所有 Compose 项目（30 秒缓存）"""
-    cached = cache.get("compose_projects")
-    if cached is not None:
+async def list_compose_projects(force: bool = Query(default=False)):
+    """列出所有 Compose 项目（stale-while-revalidate）
+
+    默认立刻返回上一次快照，超过 8 秒后台重算；force=true 时同步重算（供"刷新"按钮）。
+    """
+    if force:
+        cache.invalidate("compose_projects")
+    cached, age = cache.get_stale("compose_projects", SWR_MAX_AGE)
+    if cached is not None and not force:
+        if age >= SWR_REFRESH_AFTER:
+            _swr_refresh("compose_projects")
         return cached
     try:
         projects = await asyncio.to_thread(docker_client.list_compose_projects)

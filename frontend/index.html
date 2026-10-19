@@ -992,7 +992,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <el-button type="success" @click="openCreateCompose" size="default">
               <el-icon style="margin-right: 4px;"><Plus /></el-icon>新建项目
             </el-button>
-            <el-button type="primary" @click="loadComposeProjects" :loading="composeLoading" size="default">刷新列表</el-button>
+            <el-button type="primary" @click="loadComposeProjects({ force: true })" :loading="composeLoading" size="default">刷新列表</el-button>
           </div>
           <div class="container-table-wrap">
           <el-table :data="paginatedComposeProjects" stripe style="width: 100%;" v-loading="composeLoading" empty-text="暂无 Compose 项目" @row-click="(_row, _col, e) => { if(e.target.tagName==='TD') openComposeDetail(_row) }">
@@ -1187,7 +1187,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <el-button @click="mirrorsDialogVisible = true; loadMirrors()" size="default">⚡ 加速器</el-button>
               <el-button @click="imageImportInput.click()" size="default">📥 导入</el-button>
               <input ref="imageImportInput" type="file" accept=".tar,.tar.gz,.tgz" style="display:none;" @change="onImageImport">
-              <el-button type="primary" @click="loadImages" :loading="imagesLoading" size="default">刷新</el-button>
+              <el-button type="primary" @click="loadImages({ force: true })" :loading="imagesLoading" size="default">刷新</el-button>
             </div>
           </div>
           <div class="container-table-wrap">
@@ -2665,9 +2665,10 @@ const app = createApp({
     const unusedImageSizeMB = computed(() => Math.round(images.value.filter(i => !i.is_used).reduce((s, i) => s + i.size_mb, 0)));
     async function loadImages(opts) {
       const silent = !!(opts && opts.silent);
+      const force = !!(opts && opts.force);
       imagesLoading.value = true;
       try {
-        const res = await apiFetch('/api/images');
+        const res = await apiFetch('/api/images' + (force ? '?force=1' : ''));
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           if (!silent) ElementPlus.ElMessage.error('获取镜像列表失败: ' + (errData.detail || res.statusText));
@@ -2843,10 +2844,11 @@ const app = createApp({
     const currentComposeForSchedules = ref(null);
     const currentComposeSchedules = computed(() => { if (!currentComposeForSchedules.value) return []; return schedules.value.filter(s => s.target_type === 'compose' && s.container_name === currentComposeForSchedules.value); });
 
-    async function loadComposeProjects() {
+    async function loadComposeProjects(opts) {
+      const force = !!(opts && opts.force);
       composeLoading.value = true;
       try {
-        const res = await apiFetch('/api/compose/projects');
+        const res = await apiFetch('/api/compose/projects' + (force ? '?force=1' : ''));
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           ElementPlus.ElMessage.error('获取 Compose 项目失败: ' + (errData.detail || res.statusText));
@@ -3179,7 +3181,7 @@ const app = createApp({
     function formatBytes(b) { if (!b || b === 0) return '0B'; const units = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = b; while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; } return v.toFixed(i > 0 ? 1 : 0) + units[i]; }
     function formatSpeed(bps) { if (!bps || bps === 0) return '0 B/s'; const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']; let i = 0; let v = bps; while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; } return v.toFixed(i > 0 ? 1 : 0) + ' ' + units[i]; }
     // ============ 全局刷新 ============
-    async function refreshAll() { refreshing.value = true; await Promise.all([loadDockerInfo(), loadContainers(), loadSchedules(), loadComposeProjects()]); refreshing.value = false; }
+    async function refreshAll() { refreshing.value = true; await Promise.all([loadDockerInfo(), loadContainers(), loadSchedules(), loadComposeProjects({ force: true })]); loadImages({ force: true, silent: true }); refreshing.value = false; }
     async function loadDockerInfo() { try { const res = await apiFetch('/api/docker/info'); dockerInfo.value = await res.json(); } catch (e) { if (e.message !== 'Unauthorized') dockerInfo.value = { success: false }; } }
     // ============ 初始化 ============
     async function initAppData() {
