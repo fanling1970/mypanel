@@ -2663,18 +2663,19 @@ const app = createApp({
     const paginatedImages = computed(() => { const start = (imagePage.value - 1) * imagePageSize.value; return filteredImages.value.slice(start, start + imagePageSize.value); });
     const totalImageSizeMB = computed(() => Math.round(images.value.reduce((s, i) => s + i.size_mb, 0)));
     const unusedImageSizeMB = computed(() => Math.round(images.value.filter(i => !i.is_used).reduce((s, i) => s + i.size_mb, 0)));
-    async function loadImages() {
+    async function loadImages(opts) {
+      const silent = !!(opts && opts.silent);
       imagesLoading.value = true;
       try {
         const res = await apiFetch('/api/images');
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          ElementPlus.ElMessage.error('获取镜像列表失败: ' + (errData.detail || res.statusText));
+          if (!silent) ElementPlus.ElMessage.error('获取镜像列表失败: ' + (errData.detail || res.statusText));
         } else {
           const data = await res.json();
           if (data.success) images.value = data.data.map(i => ({ ...i, _deleting: false }));
         }
-      } catch (e) { console.error('加载镜像列表失败:', e); ElementPlus.ElMessage.error('获取镜像列表请求失败'); }
+      } catch (e) { console.error('加载镜像列表失败:', e); if (!silent) ElementPlus.ElMessage.error('获取镜像列表请求失败'); }
       imagesLoading.value = false;
     }
     async function deleteImage(row) {
@@ -3190,11 +3191,10 @@ const app = createApp({
         localStorage.setItem('ds-user', data.data.username);
       } catch (e) { doLogout(); return; }
       loadAppVersion();
-      await loadDockerInfo();
-      await loadContainers();
-      await loadSchedules();
-      await loadComposeProjects();
-      await loadSettings();
+      // 首屏并行拉取：原先 5 个接口串行 await，总耗时≈各接口之和；改为并行后≈最慢那个
+      await Promise.all([loadDockerInfo(), loadContainers(), loadSchedules(), loadComposeProjects(), loadSettings()]);
+      // 后台预热：镜像列表与 Compose 内存统计，使切到对应标签页时命中后端 TTL 缓存
+      setTimeout(() => { loadImages({ silent: true }); loadComposeStats(); }, 300);
       // 测量顶部固定区高度：头部高 -> stats-row 的 top；头部+统计行高 -> 标签栏的 top
       nextTick(() => {
         const sync = () => {

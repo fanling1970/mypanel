@@ -24,6 +24,15 @@ from modules import docker_client
 from modules import compose_project
 from modules import scheduler as sched
 from modules import update_checker
+from modules import cache
+
+# ============ 只读接口 TTL 缓存参数 ============
+# 列表类（容器/镜像/Compose）：Docker inspect 全量较慢，30 秒内复用结果
+CACHE_TTL_LIST = 30.0
+# 实时指标类（CPU/内存）：变化快，用较短 TTL 兼顾新鲜度与开销
+CACHE_TTL_STATS = 15.0
+# 重新计算类长任务（Compose 内存采样需两次 cgroup 采样）：稍长一些
+CACHE_TTL_COMPOSE_STATS = 20.0
 
 # ============ JWT Token 管理 ============
 # 简单的 token 存储：{token: {"username": str, "expires": float}}
@@ -240,6 +249,23 @@ _AUTH_WHITELIST_PREFIXES = ("/static",)
 
 
 @app.middleware("http")
+async def cache_invalidate_middleware(request: Request, call_next):
+    """写操作后自动失效只读缓存
+
+    启停/删除容器、改设置、删镜像、改 Compose 项目等动作完成后立即清空缓存，
+    保证界面刷新看到的是最新状态，不会因为 30 秒 TTL 而显示旧数据。
+    """
+    response = await call_next(request)
+    try:
+        if request.url.path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            if 200 <= response.status_code < 400:
+                cache.invalidate_all()
+    except Exception:
+        pass
+    return response
+
+
+@app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """HTTP 认证中间件：拦截所有 /api/ 请求（白名单除外）"""
     path = request.url.path
@@ -450,8 +476,12 @@ async def index():
 
 @app.get("/api/docker/info")
 async def get_docker_info():
-    """获取Docker信息"""
+    """获取Docker信息（30 秒缓存）"""
+    cached = cache.get("docker_info")
+    if cached is not None:
+        return cached
     result = await asyncio.to_thread(docker_client.test_connection)
+    cache.set("docker_info", result, CACHE_TTL_LIST)
     return result
 
 
@@ -481,7 +511,10 @@ async def get_app_info():
 
 @app.get("/api/containers")
 async def list_containers():
-    """获取容器列表（快速返回基本信息，不含stats）"""
+    """获取容器列表（快速返回基本信息，不含stats；30 秒缓存）"""
+    cached = cache.get("containers")
+    if cached is not None:
+        return cached
     try:
         containers = await asyncio.to_thread(docker_client.list_containers, True)
         # 附加更新检查偏好 + 基本信息（运行时长/IP/健康状态）
@@ -494,7 +527,9 @@ async def list_containers():
                 pass
             # stats 不在此处获取，由前端异步请求 /api/containers/stats
             c["stats"] = None
-        return {"success": True, "data": containers}
+        payload = {"success": True, "data": containers}
+        cache.set("containers", payload, CACHE_TTL_LIST)
+        return payload
     except Exception as e:
         logger.error(f"获取容器列表失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -502,7 +537,10 @@ async def list_containers():
 
 @app.get("/api/containers/stats")
 async def get_all_containers_stats():
-    """批量获取所有运行中容器的实时统计（并行获取）"""
+    """批量获取所有运行中容器的实时统计（并行获取；15 秒缓存）"""
+    cached = cache.get("containers_stats")
+    if cached is not None:
+        return cached
     try:
         containers = await asyncio.to_thread(docker_client.list_containers, False)
         running = [c for c in containers if c["status"] == "running"]
@@ -517,7 +555,9 @@ async def get_all_containers_stats():
                 stats_map[c["id"]] = None
             else:
                 stats_map[c["id"]] = result
-        return {"success": True, "data": stats_map}
+        payload = {"success": True, "data": stats_map}
+        cache.set("containers_stats", payload, CACHE_TTL_STATS)
+        return payload
     except Exception as e:
         logger.error(f"批量获取容器统计失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -525,10 +565,15 @@ async def get_all_containers_stats():
 
 @app.get("/api/compose/stats")
 async def get_all_compose_stats():
-    """批量获取所有 Compose 项目的内存占用（并行获取，用于列表页内存列异步填充）"""
+    """批量获取所有 Compose 项目的内存占用（并行获取；20 秒缓存）"""
+    cached = cache.get("compose_stats")
+    if cached is not None:
+        return cached
     try:
         memory_map = await asyncio.to_thread(docker_client.get_all_compose_memory)
-        return {"success": True, "data": memory_map}
+        payload = {"success": True, "data": memory_map}
+        cache.set("compose_stats", payload, CACHE_TTL_COMPOSE_STATS)
+        return payload
     except Exception as e:
         logger.error(f"批量获取 Compose 内存失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1065,10 +1110,15 @@ async def get_container_logs_api(container_id: str, tail: int = Query(default=20
 
 @app.get("/api/images")
 async def list_images():
-    """获取所有镜像列表"""
+    """获取所有镜像列表（30 秒缓存）"""
+    cached = cache.get("images")
+    if cached is not None:
+        return cached
     try:
         images = await asyncio.to_thread(docker_client.list_images)
-        return {"success": True, "data": images}
+        payload = {"success": True, "data": images}
+        cache.set("images", payload, CACHE_TTL_LIST)
+        return payload
     except Exception as e:
         logger.error(f"获取镜像列表失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1216,10 +1266,15 @@ async def delete_compose_project(target: str = Query(..., description="项目目
 
 @app.get("/api/compose/projects")
 async def list_compose_projects():
-    """列出所有 Compose 项目"""
+    """列出所有 Compose 项目（30 秒缓存）"""
+    cached = cache.get("compose_projects")
+    if cached is not None:
+        return cached
     try:
         projects = await asyncio.to_thread(docker_client.list_compose_projects)
-        return {"success": True, "data": projects}
+        payload = {"success": True, "data": projects}
+        cache.set("compose_projects", payload, CACHE_TTL_LIST)
+        return payload
     except Exception as e:
         logger.error(f"获取 Compose 项目列表失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
