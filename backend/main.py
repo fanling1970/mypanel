@@ -26,6 +26,12 @@ from modules import scheduler as sched
 from modules import update_checker
 from modules import cache
 
+from starlette.middleware.gzip import GZipMiddleware
+
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 # ============ 只读接口 TTL 缓存参数 ============
 # 列表类（容器/镜像/Compose）：Docker inspect 全量较慢，30 秒内复用结果
 CACHE_TTL_LIST = 30.0
@@ -33,6 +39,79 @@ CACHE_TTL_LIST = 30.0
 CACHE_TTL_STATS = 15.0
 # 重新计算类长任务（Compose 内存采样需两次 cgroup 采样）：稍长一些
 CACHE_TTL_COMPOSE_STATS = 20.0
+
+# ============ stale-while-revalidate ============
+# 数据超过 SWR_REFRESH_AFTER 秒就触发后台刷新，但请求立刻返回上一次快照。
+# 关键原因：docker stats(stream=False) 必须等两帧采样，单次就要 1~2 秒，
+# 仅靠 TTL 无法消除——隔十几秒手动刷新一样会重新付出这个代价。
+SWR_REFRESH_AFTER = 8.0
+# 超过该年龄则不再兜底返回旧数据，避免展示很久以前的状态
+SWR_MAX_AGE = 600.0
+
+BUILD_COMMIT = (os.environ.get("GIT_COMMIT") or os.environ.get("BUILD_COMMIT") or "unknown")[:12]
+
+_swr_lock = threading.Lock()
+_swr_inflight = set()
+_last_ms = {}
+
+
+def _build_containers_stats() -> dict:
+    """同步计算所有运行中容器的 stats（在线程池里并发，约等于一次采样耗时）。"""
+    containers = docker_client.list_containers(False)
+    running = [c for c in containers if c.get("status") == "running"]
+    if not running:
+        return {"success": True, "data": {}}
+
+    full_ids = [c["full_id"] for c in running]
+    short_of = {c["full_id"]: c["id"] for c in running}
+
+    def one(cid):
+        try:
+            return cid, docker_client.get_container_stats(cid)
+        except Exception:
+            return cid, None
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=min(32, len(full_ids))) as pool:
+        for cid, st in pool.map(one, full_ids):
+            out[short_of.get(cid, cid)] = st
+    return {"success": True, "data": out}
+
+
+def _build_compose_stats() -> dict:
+    return {"success": True, "data": docker_client.get_all_compose_memory()}
+
+
+_SWR_PRODUCERS = {
+    "containers_stats": _build_containers_stats,
+    "compose_stats": _build_compose_stats,
+}
+
+
+def _swr_refresh(key: str) -> None:
+    """后台单飞刷新：同一 key 同时只跑一个线程，避免重复计算叠加负载。"""
+    producer = _SWR_PRODUCERS.get(key)
+    if producer is None:
+        return
+    with _swr_lock:
+        if key in _swr_inflight:
+            return
+        _swr_inflight.add(key)
+
+    def run():
+        t0 = time.monotonic()
+        try:
+            val = producer()
+            ttl = CACHE_TTL_COMPOSE_STATS if key == "compose_stats" else CACHE_TTL_STATS
+            cache.set(key, val, ttl)
+            _last_ms[key] = round((time.monotonic() - t0) * 1000)
+        except Exception as e:
+            logger.warning(f"后台刷新 {key} 失败: {e}")
+        finally:
+            with _swr_lock:
+                _swr_inflight.discard(key)
+
+    threading.Thread(target=run, daemon=True, name=f"swr-{key}").start()
 
 # ============ JWT Token 管理 ============
 # 简单的 token 存储：{token: {"username": str, "expires": float}}
@@ -223,6 +302,15 @@ async def lifespan(app: FastAPI):
     # 本私有版：已移除启动后的后台自动检查更新任务
     logger.info("后台自动检查镜像更新：已禁用（启动不再自动检查）")
 
+    # 预热 stats 缓存：容器重启后的第一个请求也能立即拿到数据，
+    # 不必再等 docker stats 的两帧采样（单次 1~2 秒）
+    try:
+        _swr_refresh("containers_stats")
+        _swr_refresh("compose_stats")
+        logger.info("已触发 stats 缓存预热（后台线程）")
+    except Exception as e:
+        logger.warning(f"stats 预热失败: {e}")
+
     logger.info("MyPanel 应用已启动")
     yield
 
@@ -246,6 +334,10 @@ if os.path.isdir(FRONTEND_DIR):
 # 不需要认证的路径前缀
 _AUTH_WHITELIST = {"/", "/api/auth/login", "/api/auth/verify", "/api/app-info"}
 _AUTH_WHITELIST_PREFIXES = ("/static",)
+
+
+# 静态资源压缩：element-plus 单个 JS 就有 960KB，压缩后首屏传输量大幅下降
+app.add_middleware(GZipMiddleware, minimum_size=512)
 
 
 @app.middleware("http")
@@ -474,6 +566,31 @@ async def index():
 
 # ============ Docker信息 ============
 
+@app.get("/api/debug/perf")
+async def debug_perf():
+    """性能自检：确认镜像版本、缓存状态、各重任务实测耗时。
+
+    部署后访问 /api/debug/perf：
+    - build_commit 等于最新提交号 → 说明镜像确实更新了
+    - last_task_ms 显示 stats / compose_stats 的真实重算耗时
+    """
+    return {
+        "build_commit": BUILD_COMMIT,
+        "cache": cache.stats(),
+        "last_task_ms": dict(_last_ms),
+        "swr": {
+            "refresh_after_s": SWR_REFRESH_AFTER,
+            "max_age_s": SWR_MAX_AGE,
+            "inflight": sorted(_swr_inflight),
+        },
+        "ttl": {
+            "list_s": CACHE_TTL_LIST,
+            "stats_s": CACHE_TTL_STATS,
+            "compose_stats_s": CACHE_TTL_COMPOSE_STATS,
+        },
+    }
+
+
 @app.get("/api/docker/info")
 async def get_docker_info():
     """获取Docker信息（30 秒缓存）"""
@@ -504,7 +621,7 @@ async def get_app_info():
                         break
     except Exception:
         pass
-    return {"success": True, "data": {"version": version}}
+    return {"success": True, "data": {"version": version, "build_commit": BUILD_COMMIT}}
 
 
 # ============ 容器管理 API ============
@@ -521,10 +638,8 @@ async def list_containers():
         settings = await db.get_container_update_settings()
         for c in containers:
             c["check_update_enabled"] = settings.get(c["name"], 1)
-            try:
-                docker_client.enrich_container_info(c)
-            except Exception:
-                pass
+            # 运行时长 / IP / 健康状态已在 docker_client.list_containers 内联完成，
+            # 此处不再逐容器调用 enrich_container_info（那会多出 17 次 containers.get）
             # stats 不在此处获取，由前端异步请求 /api/containers/stats
             c["stats"] = None
         payload = {"success": True, "data": containers}
@@ -537,9 +652,14 @@ async def list_containers():
 
 @app.get("/api/containers/stats")
 async def get_all_containers_stats():
-    """批量获取所有运行中容器的实时统计（并行获取；15 秒缓存）"""
-    cached = cache.get("containers_stats")
+    """批量获取所有运行中容器的实时统计（stale-while-revalidate）
+
+    直接返回上一次快照，超过 8 秒则在后台重算——用户侧除首次外都是瞬时响应。
+    """
+    cached, age = cache.get_stale("containers_stats", SWR_MAX_AGE)
     if cached is not None:
+        if age >= SWR_REFRESH_AFTER:
+            _swr_refresh("containers_stats")
         return cached
     try:
         containers = await asyncio.to_thread(docker_client.list_containers, False)
@@ -565,9 +685,11 @@ async def get_all_containers_stats():
 
 @app.get("/api/compose/stats")
 async def get_all_compose_stats():
-    """批量获取所有 Compose 项目的内存占用（并行获取；20 秒缓存）"""
-    cached = cache.get("compose_stats")
+    """批量获取所有 Compose 项目的内存占用（stale-while-revalidate）"""
+    cached, age = cache.get_stale("compose_stats", SWR_MAX_AGE)
     if cached is not None:
+        if age >= SWR_REFRESH_AFTER:
+            _swr_refresh("compose_stats")
         return cached
     try:
         memory_map = await asyncio.to_thread(docker_client.get_all_compose_memory)

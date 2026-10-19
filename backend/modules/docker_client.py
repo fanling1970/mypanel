@@ -285,20 +285,23 @@ def list_containers(all: bool = True) -> list[dict]:
     for c in containers:
         try:
             is_self = c.name in SELF_CONTAINER_NAMES
+            # State 统一取字典形态，避免字符串/字典差异导致后续 .get 报错
+            _st_dict = c.attrs.get("State") if isinstance(c.attrs.get("State"), dict) else {}
 
             # 解析端口映射（仅 IPv4，过滤 IPv6 双栈重复项）
             ports = _parse_container_ports(c)
 
-            # 获取镜像名（只取repository:tag部分）
+            # 获取镜像名：直接读列表已返回的 attrs
+            # 原先 c.image.tags 会为每个容器额外发起一次镜像 inspect，
+            # 17 个容器就是 17 次 API 往返，是首屏变慢的主要来源之一
             image_name = ""
             try:
-                image_tags = c.image.tags if c.image and c.image.tags else []
-                if image_tags:
-                    image_name = image_tags[0]
-                else:
-                    image_name = c.image.id[:12] if c.image else ""
+                image_name = (c.attrs.get("Config") or {}).get("Image") or ""
+                if not image_name:
+                    _iid = c.attrs.get("Image") or ""
+                    image_name = _iid[7:19] if _iid.startswith("sha256:") else (_iid[:12] or "unknown")
             except Exception:
-                image_name = c.attrs.get("Config", {}).get("Image", "")[:30] or "unknown"
+                image_name = "unknown"
 
             info = {
                 "id": c.short_id,
@@ -307,17 +310,41 @@ def list_containers(all: bool = True) -> list[dict]:
                 "is_self": is_self,
                 "image": image_name,
                 "status": c.status,
-                "state": c.attrs.get("State", {}).get("Status", "unknown"),
+                "state": _st_dict.get("Status") or (c.status or "unknown"),
                 "ports": ports,
                 "created": c.attrs.get("Created", ""),
                 "networks": list(c.attrs.get("NetworkSettings", {}).get("Networks", {}).keys()),
             }
 
-            # 运行中的容器，计算运行时长
+            # 运行中的容器：计算运行时长（只读 attrs，替代原先每容器一次 inspect）
             if c.status == "running":
-                started_at = c.attrs.get("State", {}).get("StartedAt", "")
-                if started_at and started_at != "0001-01-01T00:00:00Z":
+                started_at = _st_dict.get("StartedAt", "") or ""
+                if not started_at or started_at == "0001-01-01T00:00:00Z":
+                    try:
+                        _created = int(c.attrs.get("Created", 0) or 0)
+                        if _created:
+                            started_at = datetime.fromtimestamp(_created, timezone.utc).isoformat()
+                    except Exception:
+                        started_at = ""
+                if started_at:
                     info["started_at"] = started_at
+                    try:
+                        _dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                        info["uptime_seconds"] = max(
+                            int((datetime.now(timezone.utc) - _dt).total_seconds()), 0
+                        )
+                    except Exception:
+                        pass
+
+            # IP 与健康状态同样只读 attrs
+            _ips = []
+            for _n, _d in ((c.attrs.get("NetworkSettings") or {}).get("Networks") or {}).items():
+                _ip = (_d or {}).get("IPAddress", "")
+                if _ip:
+                    _ips.append(f"{_n}:{_ip}")
+            info["ip_addresses"] = _ips
+            _h = _st_dict.get("Health")
+            info["health"] = _h.get("Status", "unknown") if _h else None
 
             result.append(info)
         except Exception as e:
@@ -691,13 +718,18 @@ def test_connection() -> dict:
         return {"success": False, "message": str(e)}
 
 
-def get_container_stats(container_id: str) -> Optional[dict]:
-    """获取容器实时统计信息（CPU/内存/网络/磁盘）"""
-    client = get_client()
-    try:
-        c = client.containers.get(container_id)
-    except docker.errors.NotFound:
-        return None
+def get_container_stats(container_id: str, container=None) -> Optional[dict]:
+    """获取容器实时统计信息（CPU/内存/网络/磁盘）
+
+    可传入已获取的 container 对象，省掉一次 containers.get() 往返。
+    """
+    if container is None:
+        client = get_client()
+        try:
+            container = client.containers.get(container_id)
+        except docker.errors.NotFound:
+            return None
+    c = container
 
     if c.status != "running":
         return {
@@ -911,7 +943,10 @@ def list_images() -> list[dict]:
         try:
             if c.name in SELF_CONTAINER_NAMES:
                 continue
-            used_image_ids.add(c.image.id)
+            # 用 attrs 里的镜像 ID，避免 c.image 触发逐容器镜像查询
+            _img_id = c.attrs.get("Image") or ""
+            if _img_id:
+                used_image_ids.add(_img_id)
         except Exception:
             pass
 
@@ -925,7 +960,7 @@ def list_images() -> list[dict]:
                 break
             except Exception:
                 continue
-        self_image_id = self_container.image.id
+        self_image_id = (self_container.attrs.get("Image") or None) or self_container.image.id
     except Exception:
         pass
 

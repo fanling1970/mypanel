@@ -8,6 +8,7 @@ LABEL org.opencontainers.image.title="MyPanel"
 ARG TARGETARCH=arm64
 ARG DOCKER_VERSION=27.3.1
 ARG COMPOSE_VERSION=v2.29.7
+ARG GIT_COMMIT=unknown
 
 # 安装系统依赖
 # 说明：不再使用 apt 的 docker-cli/docker-compose（在 arm 上包名/可用性不稳定），
@@ -53,6 +54,8 @@ RUN mkdir -p /data
 
 ENV DB_PATH=/data/mypanel.db
 ENV APP_PORT=8383
+# 构建提交号：/api/debug/perf 与 /api/app-info 会返回，用于确认镜像是否为最新
+ENV GIT_COMMIT=${GIT_COMMIT}
 
 EXPOSE 8383
 

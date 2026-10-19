@@ -1,30 +1,28 @@
-"""轻量 TTL 缓存模块
+"""轻量 TTL 缓存 + stale-while-revalidate 支持
 
-用途：MyPanel 的热点只读接口。ARM 小主机（4 核 + SD 卡）上 Docker API 的
-全量 inspect / list 比较慢，30 秒内重复请求直接命中内存缓存，避免每次刷新
-都全量重算，把首屏从 6 秒级压到 1~2 秒级。
+背景：ARM 小主机（4 核 + SD 卡）上 Docker 的 stats(stream=False) 必须采集两帧，
+单次就要 1~2 秒。单纯设 TTL 对"隔十几秒手动刷新"毫无帮助（每次都过期 → 每次都重算）。
 
-设计要点：
-- 进程内字典 + 单调时钟（time.monotonic），无第三方依赖、无需 Redis
-- 线程安全：Docker 调用跑在 asyncio.to_thread 的线程池里
-- 写操作（启停容器 / 改设置 / 删镜像 / 改定时任务等）调用 invalidate_all()
-  立即整体失效，保证"操作后立刻能看到新状态"
+因此本模块额外提供 get_stale()：即使数据已过期，也把上一次的快照交出来，
+由调用方立刻响应，同时后台线程慢慢重算。用户侧体感即为"瞬时"。
 """
 
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 DEFAULT_TTL = 30.0
 
-_store: dict[str, tuple[float, Any]] = {}
+# key -> (set_at, value, ttl)
+_store: dict[str, tuple[float, Any, float]] = {}
 _lock = threading.Lock()
 _hits = 0
+_stale_hits = 0
 _misses = 0
 
 
 def get(key: str) -> Optional[Any]:
-    """返回未过期的缓存值；无缓存或已过期返回 None。"""
+    """只返回仍在新鲜期内的值。"""
     global _hits, _misses
     now = time.monotonic()
     with _lock:
@@ -32,57 +30,86 @@ def get(key: str) -> Optional[Any]:
         if item is None:
             _misses += 1
             return None
-        expire_at, value = item
-        if now >= expire_at:
-            _store.pop(key, None)
+        set_at, value, ttl = item
+        if now - set_at >= ttl:
             _misses += 1
             return None
         _hits += 1
         return value
 
 
-def set(key: str, value: Any, ttl: float = DEFAULT_TTL) -> None:
-    """写入缓存。value 为 None 时不写入，避免把失败结果缓存成"空"。"""
-    if value is None:
-        return
-    with _lock:
-        _store[key] = (time.monotonic() + ttl, value)
+def get_stale(key: str, max_age: Optional[float] = None) -> Tuple[Optional[Any], float]:
+    """返回 (值, 年龄秒)。即使已过期也返回旧值，供立即响应用。
 
-
-def is_fresh(key: str) -> bool:
-    """缓存是否仍然有效（不改变命中统计）。"""
+    max_age 用于兜底：年龄超过该秒数则视为不可用（防止返回几小时前的数据）。
+    """
+    global _stale_hits
     now = time.monotonic()
     with _lock:
         item = _store.get(key)
-        return bool(item and now < item[0])
+        if item is None:
+            return None, 0.0
+        set_at, value, ttl = item
+        age = now - set_at
+        if max_age is not None and age > max_age:
+            return None, age
+        if age >= ttl:
+            _stale_hits += 1
+        return value, age
+
+
+def set(key: str, value: Any, ttl: float = DEFAULT_TTL) -> None:
+    """写入缓存。value 为 None 时不写入，避免把失败结果缓存成空。"""
+    if value is None:
+        return
+    with _lock:
+        _store[key] = (time.monotonic(), value, ttl)
+
+
+def is_fresh(key: str) -> bool:
+    now = time.monotonic()
+    with _lock:
+        item = _store.get(key)
+        return bool(item and now - item[0] < item[2])
+
+
+def age(key: str) -> Optional[float]:
+    """缓存年龄（秒）；无该键返回 None。"""
+    now = time.monotonic()
+    with _lock:
+        item = _store.get(key)
+        return (now - item[0]) if item else None
 
 
 def invalidate(*keys: str) -> None:
-    """让指定的若干 key 失效。"""
     with _lock:
         for k in keys:
             _store.pop(k, None)
 
 
 def invalidate_all() -> None:
-    """让全部缓存失效（写操作后调用）。"""
     with _lock:
         _store.clear()
 
 
 def stats() -> dict:
-    """缓存运行状态，便于排查。"""
+    now = time.monotonic()
     with _lock:
-        return {
-            "entries": len(_store),
-            "hits": _hits,
-            "misses": _misses,
-            "ttl_seconds": DEFAULT_TTL,
+        entries = {
+            k: {"age_s": round(now - v[0], 2), "ttl_s": v[2]}
+            for k, v in _store.items()
         }
+    return {
+        "entries": len(entries),
+        "hits": _hits,
+        "stale_hits": _stale_hits,
+        "misses": _misses,
+        "default_ttl_s": DEFAULT_TTL,
+        "per_entry": entries,
+    }
 
 
 def get_or_set(key: str, producer: Callable[[], Any], ttl: float = DEFAULT_TTL) -> Any:
-    """同步场景：命中直接返回，否则执行 producer 并写入缓存。"""
     cached = get(key)
     if cached is not None:
         return cached
