@@ -55,7 +55,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 #app { visibility: hidden; }
 #app.app-ready { visibility: visible; }
 /* 头部 */
-.app-header { position: sticky; top: 0; z-index: 100; background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-light) 100%); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color); box-shadow: 0 2px 12px rgba(0,0,0,0.15); }
+.app-header { position: sticky; top: 0; z-index: 200; background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-light) 100%); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color); box-shadow: 0 2px 12px rgba(0,0,0,0.15); }
 .app-header h1 { font-size: 20px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 10px; }
 .docker-icon { width: 28px; height: 28px; background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary), #000 20%)); border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 .docker-icon svg { width: 18px; height: 18px; fill: #fff; }
@@ -82,8 +82,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .style-item { display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 2px 8px; border-radius: 6px; border: 1.5px solid transparent; transition: all 0.2s; font-size: 11px; color: var(--text-secondary); background: rgba(255,255,255,0.04); white-space: nowrap; }
 .style-item:hover { background: var(--primary-light); color: var(--primary); }
 .style-item.active { border-color: var(--primary); background: var(--primary-light); color: var(--primary); font-weight: 500; }
-.main-content { padding: 16px 20px; max-width: 100%; margin: 0; }
-.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.main-content { padding: 0 20px 16px; max-width: 100%; margin: 0; }
+/* 顶部固定层：统计卡片行粘性贴在头部下方（全局生效） */
+.stats-row::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--border-color); opacity: .55; }
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; position: sticky; top: var(--header-h, 64px); z-index: 110; margin: 0 -20px 16px; padding: 16px 20px 12px; background: var(--bg-dark); }
 .stat-card { background: var(--bg-card); border-radius: 12px; padding: 20px; border: 1px solid var(--border-color); transition: transform 0.2s; }
 .stat-card:hover { transform: translateY(-2px); }
 .stat-card.clickable { cursor: pointer; }
@@ -96,8 +98,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .stat-card .value.total { color: var(--primary); }
 .stat-card .value.schedules { color: var(--warning); }
 .stat-card .value.updatable { color: var(--danger); }
-.tab-section { background: var(--bg-card); border-radius: 12px; padding: 0; border: 1px solid var(--border-color); overflow: hidden; }
-.tab-section .el-tabs__header { margin: 0; padding: 0 20px; background: var(--bg-light); }
+.tab-section { background: var(--bg-card); border-radius: 12px; padding: 0; border: 1px solid var(--border-color); overflow: visible; }
+.tab-section .el-tabs__header { margin: 0; padding: 0 20px; background: var(--bg-light); position: sticky; top: var(--tabs-top, 150px); z-index: 100; border-radius: 12px 12px 0 0; box-shadow: 0 6px 12px -8px rgba(0,0,0,.6); }
 .tab-section .el-tabs__content { padding: 20px; }
 /* Element Plus 主题覆盖 */
 .el-table { --el-table-bg-color: transparent; --el-table-tr-bg-color: transparent; --el-table-header-bg-color: var(--bg-stripe); --el-table-row-hover-bg-color: var(--primary-light); --el-table-border-color: var(--border-color); --el-table-text-color: var(--text-primary); --el-table-header-text-color: var(--text-secondary); --el-table-current-row-bg-color: var(--primary-light); font-size: 14px; }
@@ -214,7 +216,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .download-stats-grid .stat-value { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .completed-images { margin-bottom: 12px; }
 /* 表格行单行 + 滚动 */
-.container-table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border-color); }
+.container-table-wrap { overflow: visible; border-radius: 8px; border: 1px solid var(--border-color); }
+/* 隐藏表格内部自带的细竖滚动条（镜像管理等），统一使用页面主滚动条 */
+.container-table-wrap .el-scrollbar__bar.is-vertical { display: none !important; }
+.container-table-wrap .el-table__body-wrapper .el-scrollbar__wrap,
+.container-table-wrap .el-scrollbar__wrap { overflow-y: visible !important; }
+.container-table-wrap .el-table__inner-wrapper { overflow: visible !important; }
 .container-table-wrap .el-table { min-width: 900px; }
 .container-table-wrap .el-table .cell { white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; }
 .container-table-wrap .el-table td.el-table__cell .cell, .container-table-wrap .el-table th.el-table__cell .cell { padding-left: 8px; padding-right: 8px; }
@@ -408,7 +415,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   .theme-item-dot { width: 10px; height: 10px; }
   .theme-item-text { display: none; }
   .main-content { padding: 10px; }
-  .container-table-wrap { overflow-x: auto; }
+  .container-table-wrap { overflow: visible; }
   .container-table-wrap .el-table { min-width: 100% !important; }
   .stats-row { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 16px; }
   .stat-card { padding: 12px; border-radius: 8px; }
@@ -3188,6 +3195,19 @@ const app = createApp({
       await loadSchedules();
       await loadComposeProjects();
       await loadSettings();
+      // 测量顶部固定区高度：头部高 -> stats-row 的 top；头部+统计行高 -> 标签栏的 top
+      nextTick(() => {
+        const sync = () => {
+          const h = document.querySelector('.app-header');
+          const st = document.querySelector('.stats-row');
+          if (h) document.documentElement.style.setProperty('--header-h', h.offsetHeight + 'px');
+          if (h && st) document.documentElement.style.setProperty('--tabs-top', (h.offsetHeight + st.offsetHeight) + 'px');
+        };
+        sync();
+        window.addEventListener('resize', sync);
+        const hEl = document.querySelector('.app-header');
+        if (window.ResizeObserver && hEl) new ResizeObserver(sync).observe(hEl);
+      });
     }
     onMounted(async () => {
       if (isLoggedIn.value) {
