@@ -55,7 +55,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 #app { visibility: hidden; }
 #app.app-ready { visibility: visible; }
 /* 头部 */
-.app-header { background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-light) 100%); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color); box-shadow: 0 2px 12px rgba(0,0,0,0.15); }
+.app-header { position: sticky; top: 0; z-index: 100; background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-light) 100%); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color); box-shadow: 0 2px 12px rgba(0,0,0,0.15); }
 .app-header h1 { font-size: 20px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 10px; }
 .docker-icon { width: 28px; height: 28px; background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary), #000 20%)); border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 .docker-icon svg { width: 18px; height: 18px; fill: #fff; }
@@ -214,7 +214,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .download-stats-grid .stat-value { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .completed-images { margin-bottom: 12px; }
 /* 表格行单行 + 滚动 */
-.container-table-wrap { overflow: auto; max-height: calc(100vh - 320px); border-radius: 8px; border: 1px solid var(--border-color); }
+.container-table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border-color); }
 .container-table-wrap .el-table { min-width: 900px; }
 .container-table-wrap .el-table .cell { white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; }
 .container-table-wrap .el-table td.el-table__cell .cell, .container-table-wrap .el-table th.el-table__cell .cell { padding-left: 8px; padding-right: 8px; }
@@ -408,7 +408,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   .theme-item-dot { width: 10px; height: 10px; }
   .theme-item-text { display: none; }
   .main-content { padding: 10px; }
-  .container-table-wrap { max-height: calc(100vh - 380px); }
+  .container-table-wrap { overflow-x: auto; }
   .container-table-wrap .el-table { min-width: 100% !important; }
   .stats-row { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 16px; }
   .stat-card { padding: 12px; border-radius: 8px; }
@@ -1579,21 +1579,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <el-form label-width="140px" label-position="right">
       <el-divider content-position="left">镜像更新检查</el-divider>
       <el-form-item label="自动检查更新">
-        <el-switch v-model="settingsForm.auto_check_enabled" :active-value="'1'" :inactive-value="'0'"></el-switch>
-        <span style="margin-left: 12px; font-size: 12px; color: var(--text-dim);">后台定期自动检测容器镜像是否有新版本</span>
-      </el-form-item>
-      <el-form-item label="检查间隔">
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <el-input-number v-model="settingsForm.auto_check_interval" :min="1" :max="168" :step="1" style="width: 140px;"></el-input-number>
-          <span style="color: var(--text-secondary); font-size: 13px;">小时</span>
-        </div>
-      </el-form-item>
-      <el-form-item label="启动延迟">
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <el-input-number v-model="settingsForm.check_delay_seconds" :min="10" :max="600" :step="10" style="width: 140px;"></el-input-number>
-          <span style="color: var(--text-secondary); font-size: 13px;">秒</span>
-        </div>
-        <div style="font-size: 12px; color: var(--text-dim); margin-top: 4px;">应用启动后延迟多久开始首次自动检查</div>
+        <span style="font-size: 12px; color: var(--text-dim);">已移除。本版本不再在启动/打开页面时自动检查更新，请在上方工具栏点击「检查更新」手动触发。</span>
       </el-form-item>
     </el-form>
     <template #footer>
@@ -2009,7 +1995,7 @@ const app = createApp({
     // ============ 应用设置 ============
     const settingsDialogVisible = ref(false);
     const settingsSaving = ref(false);
-    const settingsForm = reactive({ auto_check_enabled: '1', auto_check_interval: '1', check_delay_seconds: '60' });
+    const settingsForm = reactive({ auto_check_enabled: '0', auto_check_interval: '1', check_delay_seconds: '60' });
     async function loadSettings() { try { const res = await apiFetch('/api/settings'); const data = await res.json(); if (data.success) Object.assign(settingsForm, data.data); } catch (e) {} }
     async function saveSettings() { settingsSaving.value = true; try { const res = await apiFetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settingsForm) }); const data = await res.json(); if (data.success) { ElementPlus.ElMessage.success('设置已保存'); settingsDialogVisible.value = false; } else ElementPlus.ElMessage.error('保存失败'); } catch (e) { ElementPlus.ElMessage.error('请求失败'); } settingsSaving.value = false; }
     // ============ 响应式检测 ============

@@ -113,7 +113,7 @@ def _is_auto_check_enabled() -> bool:
             return row["value"] == "1"
     except Exception:
         pass
-    return True  # 默认开启
+    return False  # 默认关闭（本私有版移除启动自动检查）
 
 
 async def _auto_check_updates_loop():
@@ -211,9 +211,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"加载更新检查缓存失败: {e}")
 
-    # 启动后台自动检查镜像更新
-    _auto_check_task = asyncio.create_task(_auto_check_updates_loop())
-    logger.info("后台自动检查镜像更新已启动")
+    # 本私有版：已移除启动后的后台自动检查更新任务
+    logger.info("后台自动检查镜像更新：已禁用（启动不再自动检查）")
 
     logger.info("MyPanel 应用已启动")
     yield

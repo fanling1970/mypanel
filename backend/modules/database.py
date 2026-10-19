@@ -361,7 +361,7 @@ async def clear_schedule_logs(before_days: int = 30):
 
 # 默认设置值
 DEFAULT_SETTINGS = {
-    "auto_check_enabled": "1",       # 自动检查更新开关（1=开启，0=关闭）
+    "auto_check_enabled": "0",       # 自动检查更新开关（1=开启，0=关闭；本私有版默认关闭）
     "auto_check_interval": "1",      # 自动检查间隔（小时）
     "check_delay_seconds": "60",     # 启动后延迟检查秒数
 }
