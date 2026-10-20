@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.001"
+APP_VERSION = "2.7.3.002"
 
 import asyncio
 import json
@@ -25,6 +25,7 @@ from modules import compose_project
 from modules import scheduler as sched
 from modules import update_checker
 from modules import cache
+from modules.snapshot import SnapshotCollector
 
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -285,6 +286,42 @@ async def _log_check_results(results: dict, source: str = "手动检查"):
     )
 
 
+# ============ 后台常驻采集器 ============
+# 思路：把「每次请求现算」换成「后台持续算、请求只读内存」。
+# docker stats(stream=False) 必须等两帧采样（1~2 秒），
+# 现算一次就要付一次；采集器把它挪出请求路径，所有接口直接读快照。
+COLLECT_INTERVAL_STATS = 2.0   # 需要采样两帧的项，节奏稍缓
+COLLECT_INTERVAL_LIST = 5.0    # 列表类很便宜，5 秒足够新鲜
+
+
+def _collect_into_cache(key, fn):
+    """把生产者结果写入 cache，供所有既有端点直接命中。"""
+    def _job():
+        payload = fn()
+        cache.set(key, payload, _SWR_TTLS.get(key, CACHE_TTL_LIST))
+        return payload
+    return _job
+
+
+def _collect_containers_raw():
+    """容器原始列表（不含 settings，settings 由端点在请求时叠加）。"""
+    payload = {"success": True, "data": docker_client.list_containers(True)}
+    cache.set("containers_raw", payload, CACHE_TTL_LIST)
+    return payload
+
+
+collector = SnapshotCollector(tick=0.5, max_workers=4)
+
+for _k, _fn in _SWR_PRODUCERS.items():
+    collector.register(
+        _k, _collect_into_cache(_k, _fn),
+        interval=COLLECT_INTERVAL_STATS if _k.endswith("_stats") else COLLECT_INTERVAL_LIST,
+        initial_delay=0.05,
+    )
+collector.register("containers_raw", _collect_containers_raw,
+                   interval=COLLECT_INTERVAL_LIST, initial_delay=0.05)
+
+
 # ============ 应用生命周期 ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -320,16 +357,14 @@ async def lifespan(app: FastAPI):
     # 本私有版：已移除启动后的后台自动检查更新任务
     logger.info("后台自动检查镜像更新：已禁用（启动不再自动检查）")
 
-    # 预热 stats 缓存：容器重启后的第一个请求也能立即拿到数据，
-    # 不必再等 docker stats 的两帧采样（单次 1~2 秒）
+    # 启动后台常驻采集器：进程一起来就持续刷新快照，
+    # 用户第一个请求即命中内存，不必等任何一次两帧采样。
     try:
-        _swr_refresh("containers_stats")
-        _swr_refresh("compose_stats")
-        _swr_refresh("images")
-        _swr_refresh("compose_projects")
-        logger.info("已触发缓存预热（后台线程）：stats / compose_stats / images / compose_projects")
+        collector.start()
+        logger.info("后台常驻采集器已启动：containers / containers_stats / "
+                    "compose_stats / images / compose_projects")
     except Exception as e:
-        logger.warning(f"stats 预热失败: {e}")
+        logger.warning(f"采集器启动失败: {e}")
 
     logger.info("MyPanel 应用已启动")
     yield
@@ -337,6 +372,11 @@ async def lifespan(app: FastAPI):
     logger.info("停止后台自动检查...")
     if _auto_check_task:
         _auto_check_task.cancel()
+    logger.info("停止采集器...")
+    try:
+        collector.stop()
+    except Exception:
+        pass
     logger.info("停止调度器...")
     sched.stop_scheduler()
     logger.info("应用已关闭")
@@ -596,6 +636,7 @@ async def debug_perf():
     """
     return {
         "version": APP_VERSION,
+        "collector": collector.snapshot_stats(),
         "build_commit": BUILD_COMMIT,
         "cache": cache.stats(),
         "last_task_ms": dict(_last_ms),
@@ -648,27 +689,26 @@ async def get_app_info():
 # ============ 容器管理 API ============
 
 @app.get("/api/containers")
-async def list_containers():
-    """获取容器列表（快速返回基本信息，不含stats；30 秒缓存）"""
-    cached = cache.get("containers")
-    if cached is not None:
-        return cached
-    try:
+async def list_containers(force: bool = Query(default=False)):
+    """获取容器列表（读采集器快照，命中时 ~0ms）
+
+    采集器在后台每 5 秒重建一次快照；force=true 时同步重算（刷新按钮用）。
+    settings 每次请求叠加，sqlite 读很便宜，保证开关状态即时生效。
+    """
+    if force:
+        cache.invalidate("containers_raw")
+    raw = cache.get("containers_raw")
+    if raw is not None:
+        containers = [dict(c) for c in raw.get("data") or []]
+    else:
         containers = await asyncio.to_thread(docker_client.list_containers, True)
-        # 附加更新检查偏好 + 基本信息（运行时长/IP/健康状态）
-        settings = await db.get_container_update_settings()
-        for c in containers:
-            c["check_update_enabled"] = settings.get(c["name"], 1)
-            # 运行时长 / IP / 健康状态已在 docker_client.list_containers 内联完成，
-            # 此处不再逐容器调用 enrich_container_info（那会多出 17 次 containers.get）
-            # stats 不在此处获取，由前端异步请求 /api/containers/stats
-            c["stats"] = None
-        payload = {"success": True, "data": containers}
-        cache.set("containers", payload, CACHE_TTL_LIST)
-        return payload
-    except Exception as e:
-        logger.error(f"获取容器列表失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    settings = await db.get_container_update_settings()
+    for c in containers:
+        c["check_update_enabled"] = settings.get(c["name"], 1)
+        # 运行时长 / IP / 健康状态已在 list_containers 内联完成
+        # stats 不在此处获取，由前端异步请求 /api/containers/stats
+        c["stats"] = None
+    return {"success": True, "data": containers}
 
 
 @app.get("/api/containers/stats")
@@ -765,6 +805,8 @@ async def start_container(container_id: str):
     result = await asyncio.to_thread(docker_client.start_container, container_id)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    # 状态已变，让容器快照立即失效，下一次加载即为最新
+    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
     return result
 
 
@@ -774,6 +816,8 @@ async def stop_container(container_id: str):
     result = await asyncio.to_thread(docker_client.stop_container, container_id)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    # 状态已变，让容器快照立即失效，下一次加载即为最新
+    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
     return result
 
 
@@ -783,6 +827,8 @@ async def restart_container(container_id: str):
     result = await asyncio.to_thread(docker_client.restart_container, container_id)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    # 状态已变，让容器快照立即失效，下一次加载即为最新
+    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
     return result
 
 
@@ -806,6 +852,8 @@ async def create_container(req: ContainerCreateRequest):
     result = await asyncio.to_thread(docker_client.create_container, req.model_dump())
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    # 状态已变，让容器快照立即失效，下一次加载即为最新
+    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
     return result
 
 
@@ -1278,7 +1326,7 @@ async def list_images(force: bool = Query(default=False)):
 async def delete_image(image_id: str, force: bool = Query(default=False)):
     """删除指定镜像"""
     result = await asyncio.to_thread(docker_client.delete_image, image_id, force)
-    cache.invalidate("images", "containers", "containers_stats")
+    cache.invalidate("images", "containers_raw", "containers_stats")
     # 记录执行日志
     await db.add_schedule_log(
         schedule_id=0, schedule_name="手动操作",
@@ -1296,7 +1344,7 @@ async def delete_image(image_id: str, force: bool = Query(default=False)):
 async def cleanup_unused_images():
     """清理所有未使用镜像和无Tag镜像"""
     result = await asyncio.to_thread(docker_client.cleanup_unused_images)
-    cache.invalidate("images", "containers", "containers_stats")
+    cache.invalidate("images", "containers_raw", "containers_stats")
     # 记录执行日志
     status = "success" if result.get("success") else "failed"
     message = result.get("message", "")

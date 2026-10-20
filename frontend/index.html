@@ -2077,10 +2077,11 @@ const app = createApp({
     function onContainerPageSizeChange() { containerPage.value = 1; }
     watch(containerSearch, () => { containerPage.value = 1; });
     watch(containerStatusFilter, (val) => { containerPage.value = 1; if (!val) statFilter.value = ''; else if (val === 'running') statFilter.value = 'running'; else if (val === 'exited') statFilter.value = 'stopped'; });
-    async function loadContainers() {
+    async function loadContainers(opts) {
+      const force = !!(opts && opts.force);
       containersLoading.value = true;
       try {
-        const res = await apiFetch('/api/containers');
+        const res = await apiFetch('/api/containers' + (force ? '?force=1' : ''));
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           ElementPlus.ElMessage.error('获取容器列表失败: ' + (errData.detail || res.statusText));
@@ -3217,7 +3218,7 @@ const app = createApp({
       }
     });
     onUnmounted(() => { stopDetailPoll(); });
-    watch(activeTab, (tab) => { if (tab === 'logs') loadScheduleLogs(); if (tab === 'images') loadImages(); if (tab === 'compose') loadComposeProjects(); });
+    watch(activeTab, (tab) => { if (tab === 'containers') loadContainers(); if (tab === 'logs') loadScheduleLogs(); if (tab === 'images') loadImages(); if (tab === 'compose') loadComposeProjects(); });
     watch(imageFilter, () => { imagePage.value = 1; });
     watch(settingsDialogVisible, (v) => { if (v) loadSettings(); });
     return {
