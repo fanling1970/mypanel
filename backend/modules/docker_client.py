@@ -568,8 +568,8 @@ def create_container(config: dict) -> dict:
         )
         if config.get("auto_start", True):
             c.start()
-            return {"success": True, "message": f"容器 {c.name} 创建并启动成功"}
-        return {"success": True, "message": f"容器 {c.name} 创建成功（未启动）"}
+            return {"success": True, "name": c.name, "message": f"容器 {c.name} 创建并启动成功"}
+        return {"success": True, "name": c.name, "message": f"容器 {c.name} 创建成功（未启动）"}
     except docker.errors.ImageNotFound:
         return {"success": False, "message": f"镜像不存在: {config.get('image', '')}，请先到镜像管理拉取或确认镜像名正确"}
     except docker.errors.APIError as e:

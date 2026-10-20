@@ -142,6 +142,17 @@ async def init_db():
             )
         """)
 
+        # 资源描述表（容器 / Compose 项目的自定义描述）
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS resource_descriptions (
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (kind, name)
+            )
+        """)
+
         # 用户表（登录认证）
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -166,6 +177,55 @@ async def init_db():
             logger.info("已创建默认管理员账户 admin/admin")
 
         await db.commit()
+
+
+# ============ 资源描述 CRUD（容器 / Compose 项目） ============
+# kind: 'container' 或 'compose'；name: 容器名或 Compose 项目名
+
+async def get_descriptions(kind: str) -> dict:
+    """获取某类资源的全部描述，返回 {name: description}"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT name, description FROM resource_descriptions WHERE kind=?", (kind,)
+        )
+        rows = await cursor.fetchall()
+        return {r["name"]: r["description"] for r in rows if r["description"]}
+
+
+async def get_description(kind: str, name: str) -> str:
+    """获取单个资源的描述，未设置返回空串"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT description FROM resource_descriptions WHERE kind=? AND name=?",
+            (kind, name)
+        )
+        row = await cursor.fetchone()
+        return row["description"] if row else ""
+
+
+async def set_description(kind: str, name: str, description: str) -> dict:
+    """设置资源描述（upsert）；传空串则删除记录"""
+    name = str(name or "").strip()
+    description = str(description or "").strip()
+    if not name:
+        return {"kind": kind, "name": name, "description": ""}
+    async with aiosqlite.connect(DB_PATH) as db:
+        if not description:
+            await db.execute(
+                "DELETE FROM resource_descriptions WHERE kind=? AND name=?",
+                (kind, name)
+            )
+        else:
+            await db.execute(
+                """INSERT INTO resource_descriptions (kind, name, description, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(kind, name) DO UPDATE SET description=excluded.description, updated_at=excluded.updated_at""",
+                (kind, name, description, datetime.now().isoformat())
+            )
+        await db.commit()
+    return {"kind": kind, "name": name, "description": description}
 
 
 # ============ 容器更新检查偏好 CRUD ============

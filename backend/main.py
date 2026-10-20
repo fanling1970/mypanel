@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.002"
+APP_VERSION = "2.7.3.003"
 
 import asyncio
 import json
@@ -703,8 +703,10 @@ async def list_containers(force: bool = Query(default=False)):
     else:
         containers = await asyncio.to_thread(docker_client.list_containers, True)
     settings = await db.get_container_update_settings()
+    descriptions = await db.get_descriptions("container")
     for c in containers:
         c["check_update_enabled"] = settings.get(c["name"], 1)
+        c["description"] = descriptions.get(c["name"], "")
         # 运行时长 / IP / 健康状态已在 list_containers 内联完成
         # stats 不在此处获取，由前端异步请求 /api/containers/stats
         c["stats"] = None
@@ -844,6 +846,7 @@ class ContainerCreateRequest(BaseModel):
     restart_policy: str = "no"
     privileged: bool = False
     auto_start: bool = True
+    description: str = ""
 
 
 @app.post("/api/containers")
@@ -852,6 +855,14 @@ async def create_container(req: ContainerCreateRequest):
     result = await asyncio.to_thread(docker_client.create_container, req.model_dump())
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    # 记录用户填写的描述（key 用实际容器名，可能是 Docker 自动生成的）
+    desc = (req.description or "").strip()
+    actual_name = str(result.get("name") or req.name or "").strip()
+    if desc and actual_name:
+        try:
+            await db.set_description("container", actual_name, desc)
+        except Exception as e:
+            logger.warning(f"保存容器描述失败: {e}")
     # 状态已变，让容器快照立即失效，下一次加载即为最新
     cache.invalidate("containers_raw", "containers_stats", "compose_stats")
     return result
@@ -1436,6 +1447,7 @@ class ComposeCreateRequest(BaseModel):
     dir_name: str = ""
     project_name: str = ""
     yaml: str = ""
+    description: str = ""
 
 
 @app.post("/api/compose/projects")
@@ -1444,6 +1456,15 @@ async def create_compose_project(req: ComposeCreateRequest):
     result = await asyncio.to_thread(compose_project.start_create_project, req.dir_name, req.yaml, req.project_name)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    # 记录描述：compose 项目名默认与目录名一致
+    desc = (req.description or "").strip()
+    if desc:
+        proj = (req.project_name or "").strip() or (result.get("project_name") or "").strip()
+        if not proj:
+            proj = os.path.basename(str(req.dir_name or "").rstrip("/"))
+        if proj:
+            await db.set_description("compose", proj, desc)
+    cache.invalidate("compose_projects")
     return result
 
 
@@ -1464,6 +1485,25 @@ async def delete_compose_project(target: str = Query(..., description="项目目
     return result
 
 
+async def _merge_compose_descriptions(payload: dict) -> dict:
+    """给 Compose 项目列表补充描述字段（复制数据，避免污染 SWR 缓存对象）"""
+    try:
+        descriptions = await db.get_descriptions("compose")
+    except Exception as e:
+        logger.warning(f"读取 Compose 描述失败: {e}")
+        descriptions = {}
+    data = payload.get("data") or []
+    merged = []
+    for p in data:
+        if isinstance(p, dict):
+            item = dict(p)
+            item["description"] = descriptions.get(item.get("name", ""), "")
+            merged.append(item)
+        else:
+            merged.append(p)
+    return {"success": payload.get("success", True), "data": merged}
+
+
 @app.get("/api/compose/projects")
 async def list_compose_projects(force: bool = Query(default=False)):
     """列出所有 Compose 项目（stale-while-revalidate）
@@ -1476,12 +1516,12 @@ async def list_compose_projects(force: bool = Query(default=False)):
     if cached is not None and not force:
         if age >= SWR_REFRESH_AFTER:
             _swr_refresh("compose_projects")
-        return cached
+        return await _merge_compose_descriptions(cached)
     try:
         projects = await asyncio.to_thread(docker_client.list_compose_projects)
         payload = {"success": True, "data": projects}
         cache.set("compose_projects", payload, CACHE_TTL_LIST)
-        return payload
+        return await _merge_compose_descriptions(payload)
     except Exception as e:
         logger.error(f"获取 Compose 项目列表失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

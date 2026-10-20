@@ -686,7 +686,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <el-table-column min-width="70" max-width="110">
               <template #header><span class="sortable-header" @click="toggleSort('name')">名称 <span class="sort-arrow" :class="{active: sortKey==='name'}">{{ sortKey==='name' ? (sortOrder==='asc' ? '▲' : '▼') : '⇅' }}</span></span></template>
               <template #default="{ row }">
-                <span class="container-name-link" :title="row.name" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="openContainerDetail(row)">{{ row.name }}<el-tag v-if="row.is_self" size="small" type="warning" effect="dark" style="margin-left:6px;vertical-align:middle;">本服务</el-tag></span>
+                <span class="container-name-link" :title="row.description ? row.name + ' - ' + row.description : row.name" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="openContainerDetail(row)">{{ row.name }}<el-tag v-if="row.is_self" size="small" type="warning" effect="dark" style="margin-left:6px;vertical-align:middle;">本服务</el-tag><el-tag v-if="row.description" size="small" type="info" effect="plain" style="margin-left:6px;vertical-align:middle;" :title="row.description">{{ row.description }}</el-tag></span>
               </template>
             </el-table-column>
             <el-table-column width="55">
@@ -716,26 +716,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <template #header><span class="sortable-header" @click="toggleSort('mem')">内存 <span class="sort-arrow" :class="{active: sortKey==='mem'}">{{ sortKey==='mem' ? (sortOrder==='asc' ? '▲' : '▼') : '⇅' }}</span></span></template>
               <template #default="{ row }">
                 <span v-if="row.stats" style="font-size: 12px; white-space: nowrap;">{{ formatBytes(row.stats.memory_usage) }} / {{ formatBytes(row.stats.memory_limit) }}</span>
-                <span v-else style="color: var(--text-dim); font-size: 12px;">-</span>
-              </template>
-            </el-table-column>
-            <el-table-column v-if="!isMobile" width="130">
-              <template #header><span class="sortable-header" @click="toggleSort('net')">网络I/O <span class="sort-arrow" :class="{active: sortKey==='net'}">{{ sortKey==='net' ? (sortOrder==='asc' ? '▲' : '▼') : '⇅' }}</span></span></template>
-              <template #default="{ row }">
-                <span v-if="row.stats" style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">
-                  <span style="color: #67C23A;">↓{{ formatBytes(row.stats.network_rx) }}</span>
-                  <span style="color: #409EFF; margin-left: 4px;">↑{{ formatBytes(row.stats.network_tx) }}</span>
-                </span>
-                <span v-else style="color: var(--text-dim); font-size: 12px;">-</span>
-              </template>
-            </el-table-column>
-            <el-table-column v-if="!isMobile" width="130">
-              <template #header><span class="sortable-header" @click="toggleSort('disk')">磁盘I/O <span class="sort-arrow" :class="{active: sortKey==='disk'}">{{ sortKey==='disk' ? (sortOrder==='asc' ? '▲' : '▼') : '⇅' }}</span></span></template>
-              <template #default="{ row }">
-                <span v-if="row.stats" style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">
-                  <span style="color: #67C23A;">↓{{ formatBytes(row.stats.block_read) }}</span>
-                  <span style="color: #E6A23C; margin-left: 4px;">↑{{ formatBytes(row.stats.block_write) }}</span>
-                </span>
                 <span v-else style="color: var(--text-dim); font-size: 12px;">-</span>
               </template>
             </el-table-column>
@@ -807,7 +787,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         </el-tab-pane>
 
         <!-- 新建容器弹窗 -->
-        <el-dialog v-model="createContainerDialogVisible" title="新建容器" width="620px" :append-to-body="true" top="4vh" destroy-on-close>
+        <el-dialog v-model="createContainerDialogVisible" title="新建容器" width="680px" :append-to-body="true" top="4vh" destroy-on-close>
+          <el-tabs v-model="createTab" style="margin-top:-8px;">
+          <el-tab-pane label="表单创建" name="form">
           <el-form :model="createForm" label-width="110px" label-position="right">
             <el-form-item label="镜像名" required>
               <el-input v-model="createForm.image" placeholder="例如: nginx:latest 或使用镜像管理中的镜像标签名"></el-input>
@@ -815,6 +797,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             </el-form-item>
             <el-form-item label="容器名">
               <el-input v-model="createForm.name" placeholder="留空则自动生成，例如: my-nginx"></el-input>
+            </el-form-item>
+            <el-form-item label="描述">
+              <el-input v-model="createForm.description" maxlength="60" show-word-limit placeholder="可选，例如: 家庭相册 / 下载工具"></el-input>
+              <div style="font-size:12px;color:var(--text-dim);line-height:1.5;margin-top:4px;">💡 描述会显示在容器列表名称右侧，方便区分用途</div>
             </el-form-item>
             <el-form-item label="启动命令">
               <el-input v-model="createForm.command" placeholder="可选，例如: --port 8080"></el-input>
@@ -829,7 +815,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <el-input type="textarea" v-model="createForm.volumes" :rows="2" placeholder="每行一条，格式: 宿主机目录:容器目录[:ro]&#10;例如:&#10;/vol1/docker/myapp/data:/data"></el-input>
             </el-form-item>
             <el-form-item label="网络模式">
-              <el-select v-model="createForm.network_mode" style="width: 100%;">
+              <el-select v-model="createForm.network_mode" style="width: 100%;" filterable allow-create default-first-option placeholder="选择或输入网络名">
                 <el-option label="bridge（默认桥接）" value="bridge"></el-option>
                 <el-option label="host（宿主网络，端口映射无效）" value="host"></el-option>
                 <el-option label="none（无网络）" value="none"></el-option>
@@ -850,9 +836,33 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <el-switch v-model="createForm.auto_start"></el-switch>
             </el-form-item>
           </el-form>
+          </el-tab-pane>
+          <el-tab-pane label="使用 docker run 创建" name="cmd">
+            <el-form label-width="110px" label-position="right">
+              <el-form-item label="docker run 命令">
+                <el-input type="textarea" v-model="dockerRunCmd" :rows="7" class="mono-textarea" placeholder="粘贴完整命令，例如:&#10;docker run -d --name my-nginx --restart unless-stopped -p 8080:80 -e TZ=Asia/Shanghai -v /vol1/docker/nginx/html:/usr/share/nginx/html nginx:latest"></el-input>
+              </el-form-item>
+              <el-form-item label="描述">
+                <el-input v-model="createForm.description" maxlength="60" show-word-limit placeholder="可选，例如: 家庭相册 / 下载工具"></el-input>
+              </el-form-item>
+              <el-form-item>
+                <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">
+                  ⚠️ 支持参数：<code>-d</code> <code>--name</code> <code>-p/--publish</code> <code>-e/--env</code>
+                  <code>-v/--volume</code> <code>--network</code> <code>--restart</code> <code>--privileged</code><br>
+                  镜像之后的参数会作为容器启动命令；未识别参数会忽略并提示。
+                </div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" plain @click="parseDockerRunToForm">解析并填入表单</el-button>
+                <el-button type="info" plain @click="fillDockerRunExample">填入示例</el-button>
+              </el-form-item>
+            </el-form>
+          </el-tab-pane>
+          </el-tabs>
           <template #footer>
             <el-button @click="createContainerDialogVisible = false">取消</el-button>
-            <el-button type="success" :loading="createSubmitting" @click="submitCreateContainer">创建</el-button>
+            <el-button v-if="createTab === 'cmd'" type="success" :loading="createSubmitting" @click="submitCreateFromDockerRun">解析并创建</el-button>
+            <el-button v-else type="success" :loading="createSubmitting" @click="submitCreateContainer">创建</el-button>
           </template>
         </el-dialog>
 
@@ -937,6 +947,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <el-form-item label="项目名称">
               <el-input v-model="createComposeForm.project_name" placeholder="可选，留空则与目录名一致"></el-input>
             </el-form-item>
+            <el-form-item label="描述">
+              <el-input v-model="createComposeForm.description" maxlength="60" show-word-limit placeholder="可选，例如: 家庭影院 / 网盘同步"></el-input>
+              <div style="font-size:12px;color:var(--text-dim);line-height:1.5;margin-top:4px;">💡 描述会显示在项目列表名称右侧</div>
+            </el-form-item>
             <el-form-item label="compose内容" required>
               <el-input type="textarea" v-model="createComposeForm.yaml" :rows="10" class="mono-textarea" placeholder="粘贴 docker-compose.yml 内容，例如:&#10;services:&#10;  web:&#10;    image: nginx:latest&#10;    container_name: my-nginx&#10;    ports:&#10;      - &quot;8080:80&quot;&#10;    restart: unless-stopped"></el-input>
               <div style="display:flex;gap:8px;margin-top:6px;align-items:center;">
@@ -998,7 +1012,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <el-table :data="paginatedComposeProjects" stripe style="width: 100%;" v-loading="composeLoading" empty-text="暂无 Compose 项目" @row-click="(_row, _col, e) => { if(e.target.tagName==='TD') openComposeDetail(_row) }">
             <el-table-column label="项目名称" min-width="120">
               <template #default="{ row }">
-                <span style="cursor: pointer; color: var(--primary); font-weight: 500;" @click.stop="openComposeDetail(row)">{{ row.name }}<el-tag v-if="row.is_self" size="small" type="warning" effect="dark" style="margin-left:6px;vertical-align:middle;">本服务</el-tag></span>
+                <span style="cursor: pointer; color: var(--primary); font-weight: 500;" @click.stop="openComposeDetail(row)">{{ row.name }}<el-tag v-if="row.is_self" size="small" type="warning" effect="dark" style="margin-left:6px;vertical-align:middle;">本服务</el-tag><el-tag v-if="row.description" size="small" type="info" effect="plain" style="margin-left:6px;vertical-align:middle;" :title="row.description">{{ row.description }}</el-tag></span>
               </template>
             </el-table-column>
             <el-table-column label="状态" width="90">
@@ -2118,17 +2132,151 @@ const app = createApp({
     // ============ 新建容器 ============
     const createContainerDialogVisible = ref(false);
     const createSubmitting = ref(false);
+    const createTab = ref('form');
+    const dockerRunCmd = ref('');
     const createForm = reactive({
       name: '', image: '', command: '', ports: '', env: '', volumes: '',
       network_mode: 'bridge', restart_policy: 'no', privileged: false, auto_start: true,
+      description: '',
     });
     function openCreateContainer() {
       createForm.name = ''; createForm.image = ''; createForm.command = '';
       createForm.ports = ''; createForm.env = ''; createForm.volumes = '';
       createForm.network_mode = 'bridge'; createForm.restart_policy = 'no';
       createForm.privileged = false; createForm.auto_start = true;
+      createForm.description = '';
+      createTab.value = 'form';
+      dockerRunCmd.value = '';
       createContainerDialogVisible.value = true;
     }
+    // ============ docker run 命令解析 ============
+    const DOCKER_RUN_VALUE_FLAGS = {
+      '--name': 1, '-p': 1, '--publish': 1, '-e': 1, '--env': 1, '-v': 1, '--volume': 1,
+      '--network': 1, '--net': 1, '--restart': 1, '--hostname': 1, '-h': 1, '-w': 1,
+      '--workdir': 1, '--entrypoint': 1, '-u': 1, '--user': 1, '-l': 1, '--label': 1,
+      '--memory': 1, '-m': 1, '--memory-swap': 1, '--cpus': 1, '--cpu-shares': 1,
+      '--device': 1, '--cap-add': 1, '--cap-drop': 1, '--dns': 1, '--add-host': 1,
+      '--log-driver': 1, '--log-opt': 1, '--platform': 1, '--runtime': 1, '--ulimit': 1,
+      '--shm-size': 1, '--ipc': 1, '--pid': 1, '--mount': 1, '--tmpfs': 1, '--expose': 1,
+      '--link': 1, '--env-file': 1, '--gpus': 1, '--security-opt': 1, '--sysctl': 1,
+      '--health-cmd': 1,
+    };
+    const DOCKER_RUN_BOOL_FLAGS = {
+      '-d': 1, '--detach': 1, '--privileged': 1, '--rm': 1, '--init': 1, '-i': 1,
+      '-t': 1, '-it': 1, '-ti': 1, '--interactive': 1, '--tty': 1, '--read-only': 1,
+      '--no-healthcheck': 1,
+    };
+    // 类 shell 分词：支持单/双引号与反斜杠转义
+    function tokenizeShellCommand(text) {
+      const out = [];
+      let cur = '';
+      let quote = null;
+      let has = false;
+      const s = String(text || '');
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (quote) {
+          if (ch === quote) { quote = null; }
+          else if (ch === '\\' && quote === '"' && i + 1 < s.length) { cur += s[++i]; }
+          else { cur += ch; }
+        } else if (ch === '"' || ch === "'") { quote = ch; has = true; }
+        else if (/\s/.test(ch)) { if (has || cur) { out.push(cur); cur = ''; has = false; } }
+        else if (ch === '\\' && i + 1 < s.length) { cur += s[++i]; has = true; }
+        else { cur += ch; has = true; }
+      }
+      if (has || cur) out.push(cur);
+      return out;
+    }
+    function parseDockerRunCommand(text) {
+      let raw = String(text || '').trim();
+      if (!raw) return { error: '请输入 docker run 命令' };
+      raw = raw.replace(/\\\r?\n/g, ' ').replace(/\r?\n/g, ' ');
+      const tokens = tokenizeShellCommand(raw);
+      if (!tokens.length) return { error: '请输入 docker run 命令' };
+      let i = 0;
+      if (tokens[i] === 'sudo') i++;
+      if ((tokens[i] || '').toLowerCase() === 'docker') i++;
+      if ((tokens[i] || '').toLowerCase() === 'container') i++;
+      if ((tokens[i] || '').toLowerCase() === 'run') i++;
+      const cfg = {
+        name: '', image: '', command: '', ports: [], env: [], volumes: [],
+        network_mode: '', restart_policy: '', privileged: false, extra: [],
+      };
+      let rest = [];
+      for (; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t === '--') { rest = tokens.slice(i + 1); break; }
+        if (t.charAt(0) === '-' && t.length > 1) {
+          let flag = t;
+          let val = null;
+          if (t.indexOf('--') === 0) {
+            const eq = t.indexOf('=');
+            if (eq > 0) { flag = t.slice(0, eq); val = t.slice(eq + 1); }
+          }
+          if (DOCKER_RUN_VALUE_FLAGS[flag]) {
+            if (val === null) { val = tokens[i + 1]; i++; }
+            if (val === undefined) val = '';
+            if (flag === '--name') cfg.name = val;
+            else if (flag === '-p' || flag === '--publish') cfg.ports.push(val);
+            else if (flag === '-e' || flag === '--env') cfg.env.push(val);
+            else if (flag === '-v' || flag === '--volume') cfg.volumes.push(val);
+            else if (flag === '--network' || flag === '--net') cfg.network_mode = val;
+            else if (flag === '--restart') cfg.restart_policy = val;
+            else cfg.extra.push(flag + ' ' + val);
+          } else if (flag === '--privileged') {
+            cfg.privileged = true;
+          } else if (DOCKER_RUN_BOOL_FLAGS[flag]) {
+            // -d / -it / --rm 等忽略
+          } else {
+            cfg.extra.push(flag);
+          }
+        } else {
+          rest = tokens.slice(i);
+          break;
+        }
+      }
+      if (!rest.length) return { error: '没有识别到镜像名，请把镜像写在参数后面，例如 nginx:latest' };
+      cfg.image = rest[0];
+      if (rest.length > 1) cfg.command = rest.slice(1).join(' ');
+      const RESTART_OK = ['no', 'always', 'unless-stopped', 'on-failure'];
+      let rp = String(cfg.restart_policy || '').split(':')[0];
+      if (RESTART_OK.indexOf(rp) < 0) rp = 'no';
+      cfg.restart_policy = rp;
+      cfg.network_mode = String(cfg.network_mode || '').trim() || 'bridge';
+      return cfg;
+    }
+    function applyDockerRunConfig(cfg) {
+      createForm.image = cfg.image || '';
+      createForm.name = cfg.name || '';
+      createForm.command = cfg.command || '';
+      createForm.ports = (cfg.ports || []).join('\n');
+      createForm.env = (cfg.env || []).join('\n');
+      createForm.volumes = (cfg.volumes || []).join('\n');
+      createForm.network_mode = cfg.network_mode || 'bridge';
+      createForm.restart_policy = cfg.restart_policy || 'no';
+      createForm.privileged = !!cfg.privileged;
+    }
+    function parseDockerRunToForm() {
+      const cfg = parseDockerRunCommand(dockerRunCmd.value);
+      if (cfg.error) { ElementPlus.ElMessage.warning(cfg.error); return; }
+      applyDockerRunConfig(cfg);
+      if (cfg.extra.length) {
+        ElementPlus.ElMessage.warning('以下参数暂不支持，已忽略: ' + cfg.extra.join(' '));
+      } else {
+        ElementPlus.ElMessage.success('解析成功，已填入表单，请核对后创建');
+      }
+      createTab.value = 'form';
+    }
+    function fillDockerRunExample() {
+      dockerRunCmd.value = 'docker run -d --name my-nginx --restart unless-stopped -p 8080:80 -e TZ=Asia/Shanghai -v /vol1/docker/nginx/html:/usr/share/nginx/html nginx:latest';
+    }
+    async function submitCreateFromDockerRun() {
+      const cfg = parseDockerRunCommand(dockerRunCmd.value);
+      if (cfg.error) { ElementPlus.ElMessage.warning(cfg.error); return; }
+      applyDockerRunConfig(cfg);
+      await submitCreateContainer();
+    }
+
     async function submitCreateContainer() {
       if (!createForm.image.trim()) { ElementPlus.ElMessage.warning('请填写镜像名'); return; }
       createSubmitting.value = true;
@@ -2144,6 +2292,7 @@ const app = createApp({
           restart_policy: createForm.restart_policy,
           privileged: createForm.privileged,
           auto_start: createForm.auto_start,
+          description: (createForm.description || '').trim(),
         };
         const res = await apiFetch('/api/containers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         const data = await res.json();
@@ -2891,7 +3040,7 @@ const app = createApp({
     const composeDirs = ref([]);
     const composeRootHint = ref('/vol1/1000/Docker');
     const yamlFileInput = ref(null);
-    const createComposeForm = reactive({ dir_name: '', project_name: '', yaml: '' });
+    const createComposeForm = reactive({ dir_name: '', project_name: '', yaml: '', description: '' });
     const composeLogDialogVisible = ref(false);
     const composeLogText = ref('');
     // 浏览目录
@@ -2978,7 +3127,7 @@ const app = createApp({
       portUsageLoading.value = false;
     }
     async function openCreateCompose() {
-      createComposeForm.dir_name = ''; createComposeForm.project_name = ''; createComposeForm.yaml = '';
+      createComposeForm.dir_name = ''; createComposeForm.project_name = ''; createComposeForm.yaml = ''; createComposeForm.description = '';
       createComposeDialogVisible.value = true;
       try {
         const res = await apiFetch('/api/compose/dirs');
@@ -3067,7 +3216,12 @@ const app = createApp({
       if (!createComposeForm.yaml.trim()) { ElementPlus.ElMessage.warning('请填写 compose 内容'); return; }
       composeCreating.value = true;
       try {
-        const res = await apiFetch('/api/compose/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(createComposeForm) });
+        const res = await apiFetch('/api/compose/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          dir_name: createComposeForm.dir_name,
+          project_name: createComposeForm.project_name,
+          yaml: createComposeForm.yaml,
+          description: (createComposeForm.description || '').trim(),
+        }) });
         const data = await res.json();
         if (data.success) {
           createComposeDialogVisible.value = false;
@@ -3231,6 +3385,7 @@ const app = createApp({
       sortKey, sortOrder, toggleSort, extractIPs,
       loadContainers, handleStart, handleStop, handleRestart, handleUpdate, statusText, filterByStat, toggleContainerUpdateCheck, allCheckUpdateEnabled, toggleAllUpdateCheck, batchUpdateLoading,
       createContainerDialogVisible, createForm, createSubmitting, openCreateContainer, submitCreateContainer, handleDelete,
+      createTab, dockerRunCmd, parseDockerRunToForm, submitCreateFromDockerRun, fillDockerRunExample,
       updateResults, checkingUpdates, checkUpdates, updateBadgeClass, updateBadgeText,
       updateCheckDialogVisible, updateCheckItems, updateCheckTotal, updateCheckChecked, updateCheckSummary, updateCheckListRef,
       updateCheckAborted, abortingCheck, abortCheckUpdates, onUpdateCheckDialogClose, continueCheckUpdates, loadUpdateStatus,
