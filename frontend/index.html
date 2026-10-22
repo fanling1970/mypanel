@@ -644,7 +644,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
     <!-- Tab区域 -->
     <div class="tab-section">
-      <el-tabs v-model="activeTab">
+      <el-tabs v-model="activeTab" @tab-change="onMainTabChange">
         <!-- 容器管理 -->
         <el-tab-pane label="容器管理" name="containers">
           <div class="container-toolbar" style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px;">
@@ -1302,6 +1302,87 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <div style="margin-top: 12px; font-size: 13px; color: var(--text-dim);">
             镜像总大小: <strong style="color: var(--text-primary);">{{ totalImageSizeMB }} MB</strong>
             <span v-if="unusedImageCount > 0" style="margin-left: 12px;">可回收: <strong style="color: #F56C6C;">{{ unusedImageSizeMB }} MB</strong></span>
+          </div>
+        </el-tab-pane>
+
+        <!-- 文件管理：路由器宿主机文件（不是容器内文件） -->
+        <el-tab-pane label="文件管理" name="files">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+            <el-button type="primary" @click="fileNewFile()">新建文件</el-button>
+            <el-button type="primary" @click="fileNewFolder()">新建文件夹</el-button>
+            <el-button :loading="fileUploading" @click="filePickUpload()">上传</el-button>
+            <input ref="fileImportInput" type="file" multiple style="display:none;" @change="onFileUpload">
+            <el-button :disabled="!fileSelected.length" @click="fileTransfer(false)">复制</el-button>
+            <el-button :disabled="!fileSelected.length" @click="fileTransfer(true)">移动</el-button>
+            <el-button :disabled="!fileSelected.length" @click="fileDownload(fileSelected)">下载</el-button>
+            <el-button :disabled="fileSelected.length !== 1" @click="fileEditPermission()">编辑权限</el-button>
+            <el-button type="danger" plain :disabled="!fileSelected.length" @click="fileDelete(fileSelected)">删除</el-button>
+            <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+              <el-input v-model="fileKeyword" placeholder="搜索" clearable style="width: 170px;" />
+              <el-button :loading="fileLoading" @click="fileRefresh()">刷新</el-button>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
+            <el-button-group>
+              <el-button size="small" :disabled="fileHistoryPos <= 0" @click="fileBack()">←</el-button>
+              <el-button size="small" :disabled="fileHistoryPos >= fileHistory.length - 1" @click="fileForward()">→</el-button>
+              <el-button size="small" :disabled="!fileParentPath" @click="fileGoUp()">↑</el-button>
+              <el-button size="small" :loading="fileLoading" @click="fileRefresh()">⟳</el-button>
+            </el-button-group>
+            <div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 13px;">
+              <span style="cursor: pointer;" title="回上一级" @click="fileGoUp()">🏠</span>
+              <template v-for="(seg, idx) in fileBreadcrumbs" :key="seg.path">
+                <span style="color: var(--text-dim);">/</span>
+                <a style="cursor: pointer; color: var(--primary);" @click="loadFiles(seg.path)">{{ seg.name }}</a>
+              </template>
+            </div>
+            <template v-if="fileRoots.length > 1">
+              <el-tag v-for="r in fileRoots" :key="'root-' + r.id" size="small" type="info"
+                style="cursor: pointer;" @click="loadFiles(r.host)">{{ r.name }}</el-tag>
+            </template>
+          </div>
+          <div class="container-table-wrap">
+            <el-table :data="filteredFileEntries" stripe style="width: 100%;" v-loading="fileLoading"
+              row-key="path" empty-text="空目录" @selection-change="onFileSelectionChange">
+              <el-table-column type="selection" width="42" />
+              <el-table-column label="名称" min-width="220">
+                <template #default="{ row }">
+                  <span style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;" @click="fileOpen(row)">
+                    <span>{{ row.is_dir ? '📁' : '📄' }}</span>
+                    <span style="color: var(--primary); word-break: break-all;">{{ row.name }}</span>
+                    <span v-if="row.is_link" style="color: var(--text-dim); font-size: 11px;">链接</span>
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="权限" width="80">
+                <template #default="{ row }">
+                  <span style="font-family: monospace; color: var(--text-secondary);">{{ row.mode }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="大小" width="100">
+                <template #default="{ row }">
+                  <span style="color: var(--text-secondary);">{{ row.is_dir ? '-' : fileFmtSize(row.size) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column v-if="!isMobile" label="修改时间" width="175">
+                <template #default="{ row }">
+                  <span style="font-size: 13px; color: var(--text-secondary);">{{ fileFmtTime(row.mtime) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="240" fixed="right">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" link @click="fileOpen(row)">{{ row.is_dir ? '打开' : '下载' }}</el-button>
+                  <el-button size="small" link @click="fileCopyPath(row)">复制路径</el-button>
+                  <el-button size="small" link @click="fileRename(row)">重命名</el-button>
+                  <el-button type="danger" size="small" link @click="fileDelete([row])">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <div style="margin-top: 10px; font-size: 12px; color: var(--text-dim); display: flex; gap: 16px; flex-wrap: wrap;">
+            <span>共 {{ filteredFileEntries.length }} 项</span>
+            <span v-if="fileDisk && fileDisk.total">磁盘已用 {{ fileFmtSize(fileDisk.used) }} / 共 {{ fileFmtSize(fileDisk.total) }}（可用 {{ fileFmtSize(fileDisk.free) }}）</span>
+            <span>路径：{{ fileCurrentPath }}</span>
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -2924,6 +3005,357 @@ const app = createApp({
     const imagePullInput = ref('');
     const imagePulling = ref(false);
     const imageExporting = ref('');
+
+    // ============ 文件管理（路由器宿主机文件） ============
+    const fileRoots = ref([]);
+    const fileCurrentPath = ref('/');
+    const fileEntries = ref([]);
+    const fileLoading = ref(false);
+    const fileUploading = ref(false);
+    const fileKeyword = ref('');
+    const fileSelected = ref([]);
+    const fileDisk = ref(null);
+    const fileImportInput = ref(null);
+    const fileHistory = ref([]);
+    const fileHistoryPos = ref(-1);
+    const fileLoadedOnce = ref(false);
+
+    const filteredFileEntries = computed(() => {
+      const kw = (fileKeyword.value || '').trim().toLowerCase();
+      if (!kw) return fileEntries.value;
+      return fileEntries.value.filter(e => (e.name || '').toLowerCase().indexOf(kw) >= 0);
+    });
+
+    const fileParentPath = computed(() => {
+      const p = fileCurrentPath.value || '/';
+      if (p === '/') return null;
+      const idx = p.lastIndexOf('/');
+      return idx <= 0 ? '/' : p.slice(0, idx);
+    });
+
+    const fileBreadcrumbs = computed(() => {
+      const p = fileCurrentPath.value || '/';
+      const parts = p.split('/').filter(Boolean);
+      const out = [{ name: '根目录', path: '/' }];
+      let acc = '';
+      parts.forEach(function (seg) {
+        acc += '/' + seg;
+        out.push({ name: seg, path: acc });
+      });
+      return out;
+    });
+
+    function fileFmtSize(bytes) {
+      if (bytes === null || bytes === undefined) return '-';
+      const n = Number(bytes);
+      if (!isFinite(n) || n < 0) return '-';
+      if (n < 1024) return n + ' B';
+      const units = ['KB', 'MB', 'GB', 'TB'];
+      let v = n / 1024, i = 0;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return v.toFixed(v >= 100 ? 0 : (v >= 10 ? 1 : 2)) + ' ' + units[i];
+    }
+
+    function fileFmtTime(ts) {
+      if (!ts) return '-';
+      const d = new Date(ts * 1000);
+      const p2 = function (x) { return x < 10 ? '0' + x : '' + x; };
+      return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' +
+        p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
+    }
+
+    function fileErrMsg(data) {
+      if (!data) return '操作失败';
+      if (typeof data.detail === 'string') return data.detail;
+      if (Array.isArray(data.detail) && data.detail.length) return data.detail[0].msg || '参数错误';
+      return data.message || '操作失败';
+    }
+
+    async function loadFileRoots() {
+      try {
+        const res = await apiFetch('/api/files/roots');
+        const data = await res.json().catch(function () { return {}; });
+        if (res.ok && data.success) fileRoots.value = (data.data && data.data.roots) || [];
+      } catch (e) { /* 忽略 */ }
+    }
+
+    async function loadFiles(path, noHistory) {
+      fileLoading.value = true;
+      try {
+        const res = await apiFetch('/api/files/list?path=' + encodeURIComponent(path || '/'));
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) {
+          ElementPlus.ElMessage.error(fileErrMsg(data));
+          return;
+        }
+        const d = data.data || {};
+        fileEntries.value = d.entries || [];
+        fileCurrentPath.value = d.path || '/';
+        fileDisk.value = d.disk || null;
+        if (d.roots && d.roots.length) fileRoots.value = d.roots;
+        fileLoadedOnce.value = true;
+        if (!noHistory) {
+          const h = fileHistory.value.slice(0, fileHistoryPos.value + 1);
+          if (h[h.length - 1] !== fileCurrentPath.value) {
+            h.push(fileCurrentPath.value);
+            fileHistory.value = h;
+            fileHistoryPos.value = h.length - 1;
+          }
+        }
+      } catch (e) {
+        ElementPlus.ElMessage.error('加载目录失败');
+      } finally {
+        fileLoading.value = false;
+      }
+    }
+
+    function onMainTabChange(name) {
+      if (name !== 'files') return;
+      if (fileLoadedOnce.value) return;
+      loadFileRoots();
+      loadFiles('/');
+    }
+
+    function fileRefresh() { return loadFiles(fileCurrentPath.value, true); }
+
+    function fileGoUp() {
+      const p = fileParentPath.value;
+      if (p) loadFiles(p);
+    }
+
+    function fileBack() {
+      if (fileHistoryPos.value <= 0) return;
+      fileHistoryPos.value -= 1;
+      loadFiles(fileHistory.value[fileHistoryPos.value], true);
+    }
+
+    function fileForward() {
+      if (fileHistoryPos.value >= fileHistory.value.length - 1) return;
+      fileHistoryPos.value += 1;
+      loadFiles(fileHistory.value[fileHistoryPos.value], true);
+    }
+
+    function fileOpen(row) {
+      if (!row) return;
+      if (row.is_dir) { loadFiles(row.path); return; }
+      fileDownload([row]);
+    }
+
+    function onFileSelectionChange(rows) { fileSelected.value = rows || []; }
+
+    async function fileNewFolder() {
+      let name = '';
+      try {
+        const r = await ElementPlus.ElMessageBox.prompt('请输入文件夹名称', '新建文件夹', {
+          confirmButtonText: '创建', cancelButtonText: '取消', inputPattern: /^[^\/]+$/, inputErrorMessage: '名称不能包含 /'
+        });
+        name = (r.value || '').trim();
+      } catch (e) { return; }
+      if (!name) return;
+      try {
+        const res = await apiFetch('/api/files/mkdir', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: fileCurrentPath.value, name: name })
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) { ElementPlus.ElMessage.error(fileErrMsg(data)); return; }
+        ElementPlus.ElMessage.success('已创建文件夹 ' + name);
+        fileRefresh();
+      } catch (e) { ElementPlus.ElMessage.error('创建失败'); }
+    }
+
+    async function fileNewFile() {
+      let name = '';
+      try {
+        const r = await ElementPlus.ElMessageBox.prompt('请输入文件名', '新建文件', {
+          confirmButtonText: '创建', cancelButtonText: '取消', inputPattern: /^[^\/]+$/, inputErrorMessage: '名称不能包含 /'
+        });
+        name = (r.value || '').trim();
+      } catch (e) { return; }
+      if (!name) return;
+      try {
+        const res = await apiFetch('/api/files/newfile', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: fileCurrentPath.value, name: name })
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) { ElementPlus.ElMessage.error(fileErrMsg(data)); return; }
+        ElementPlus.ElMessage.success('已创建文件 ' + name);
+        fileRefresh();
+      } catch (e) { ElementPlus.ElMessage.error('创建失败'); }
+    }
+
+    function filePickUpload() {
+      if (fileImportInput.value) fileImportInput.value.click();
+    }
+
+    async function onFileUpload(e) {
+      const files = Array.from((e.target && e.target.files) || []);
+      if (!files.length) return;
+      fileUploading.value = true;
+      let ok = 0;
+      const fails = [];
+      try {
+        for (const f of files) {
+          const fd = new FormData();
+          fd.append('file', f);
+          try {
+            const res = await apiFetch('/api/files/upload?path=' + encodeURIComponent(fileCurrentPath.value), {
+              method: 'POST', body: fd
+            });
+            const data = await res.json().catch(function () { return {}; });
+            if (res.ok && data.success) ok += 1;
+            else fails.push(f.name + ': ' + fileErrMsg(data));
+          } catch (err) {
+            fails.push(f.name + ': 上传失败');
+          }
+        }
+      } finally {
+        fileUploading.value = false;
+        if (e.target) e.target.value = '';
+      }
+      if (ok) ElementPlus.ElMessage.success('已上传 ' + ok + ' 个文件');
+      if (fails.length) ElementPlus.ElMessage.warning('失败: ' + fails.join('; '));
+      fileRefresh();
+    }
+
+    function fileDownload(rows) {
+      const list = (rows || []).filter(r => r && !r.is_dir);
+      if (!list.length) { ElementPlus.ElMessage.warning('请选择要下载的文件'); return; }
+      list.forEach(function (row, idx) {
+        let url = '/api/files/download?path=' + encodeURIComponent(row.path);
+        if (authToken.value) url += '&token=' + encodeURIComponent(authToken.value);
+        setTimeout(function () {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = row.name || '';
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }, idx * 300);
+      });
+      ElementPlus.ElMessage.success('已开始下载 ' + list.length + ' 个文件');
+    }
+
+    async function fileCopyPath(row) {
+      const p = (row && row.path) || '';
+      if (!p) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(p);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = p;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        ElementPlus.ElMessage.success('已复制路径');
+      } catch (e) { ElementPlus.ElMessage.error('复制失败，请手动复制：' + p); }
+    }
+
+    async function fileRename(row) {
+      if (!row) return;
+      let name = '';
+      try {
+        const r = await ElementPlus.ElMessageBox.prompt('请输入新名称', '重命名', {
+          confirmButtonText: '确定', cancelButtonText: '取消', inputValue: row.name,
+          inputPattern: /^[^\/]+$/, inputErrorMessage: '名称不能包含 /'
+        });
+        name = (r.value || '').trim();
+      } catch (e) { return; }
+      if (!name || name === row.name) return;
+      try {
+        const res = await apiFetch('/api/files/rename', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: row.path, new_name: name })
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) { ElementPlus.ElMessage.error(fileErrMsg(data)); return; }
+        ElementPlus.ElMessage.success('重命名成功');
+        fileRefresh();
+      } catch (e) { ElementPlus.ElMessage.error('重命名失败'); }
+    }
+
+    async function fileEditPermission() {
+      const row = fileSelected.value[0];
+      if (!row) return;
+      let mode = '';
+      try {
+        const r = await ElementPlus.ElMessageBox.prompt('请输入八进制权限（如 755、644）', '编辑权限 - ' + row.name, {
+          confirmButtonText: '保存', cancelButtonText: '取消', inputValue: row.mode || '755',
+          inputPattern: /^[0-7]{3,4}$/, inputErrorMessage: '请输入 3~4 位八进制数字'
+        });
+        mode = (r.value || '').trim();
+      } catch (e) { return; }
+      if (!mode) return;
+      try {
+        const res = await apiFetch('/api/files/permission', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: row.path, mode: mode })
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) { ElementPlus.ElMessage.error(fileErrMsg(data)); return; }
+        ElementPlus.ElMessage.success('权限已修改为 ' + mode);
+        fileRefresh();
+      } catch (e) { ElementPlus.ElMessage.error('修改权限失败'); }
+    }
+
+    async function fileDelete(rows) {
+      const list = (rows || []).filter(Boolean);
+      if (!list.length) return;
+      const names = list.slice(0, 5).map(r => r.name).join('、') + (list.length > 5 ? ' 等' : '');
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          '确定删除 ' + list.length + ' 项（' + names + '）吗？此操作不可恢复！',
+          '删除确认',
+          { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' }
+        );
+      } catch (e) { return; }
+      try {
+        const res = await apiFetch('/api/files/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: list.map(r => r.path) })
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) { ElementPlus.ElMessage.error(fileErrMsg(data)); return; }
+        if (data.failed && data.failed.length) {
+          ElementPlus.ElMessage.warning('部分失败: ' + data.failed.map(f => f.path + ' ' + f.error).join('; '));
+        } else {
+          ElementPlus.ElMessage.success('已删除 ' + (data.deleted || []).length + ' 项');
+        }
+        fileRefresh();
+      } catch (e) { ElementPlus.ElMessage.error('删除失败'); }
+    }
+
+    async function fileTransfer(isMove) {
+      const list = (fileSelected.value || []).filter(Boolean);
+      if (!list.length) return;
+      let dest = '';
+      try {
+        const r = await ElementPlus.ElMessageBox.prompt('请输入目标目录（宿主机绝对路径）',
+          (isMove ? '移动 ' : '复制 ') + list.length + ' 项',
+          { confirmButtonText: '确定', cancelButtonText: '取消', inputValue: fileCurrentPath.value });
+        dest = (r.value || '').trim();
+      } catch (e) { return; }
+      if (!dest) return;
+      try {
+        const res = await apiFetch('/api/files/' + (isMove ? 'move' : 'copy'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: list.map(r => r.path), dest: dest })
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) { ElementPlus.ElMessage.error(fileErrMsg(data)); return; }
+        if (data.failed && data.failed.length) {
+          ElementPlus.ElMessage.warning('部分失败: ' + data.failed.map(f => f.path + ' ' + f.error).join('; '));
+        } else {
+          ElementPlus.ElMessage.success(isMove ? '移动完成' : '复制完成');
+        }
+        fileRefresh();
+      } catch (e) { ElementPlus.ElMessage.error('操作失败'); }
+    }
     const imageFilter = ref('all');
     const usedImageCount = computed(() => images.value.filter(i => i.is_used).length);
     const unusedImageCount = computed(() => images.value.filter(i => !i.is_used).length);
@@ -3630,6 +4062,11 @@ const app = createApp({
       loadImages, deleteImage, cleanupUnusedImages,
       mirrorsDialogVisible, mirrorsLoading, mirrorsSaving, mirrorsPath, mirrorsExists, mirrorList, newMirror, loadMirrors, addMirror, saveMirrors, imageImportInput, onImageImport,
       imagePullDialogVisible, imagePullInput, imagePulling, imageExporting, openPullImageDialog, submitPullImage, imageExportTarget, exportImage,
+      fileRoots, fileCurrentPath, fileEntries, fileLoading, fileUploading, fileKeyword, fileSelected,
+      fileDisk, fileImportInput, fileHistory, fileHistoryPos, filteredFileEntries, fileParentPath,
+      fileBreadcrumbs, onMainTabChange, loadFiles, fileRefresh, fileGoUp, fileBack, fileForward,
+      fileOpen, onFileSelectionChange, fileNewFolder, fileNewFile, filePickUpload, onFileUpload,
+      fileDownload, fileCopyPath, fileRename, fileEditPermission, fileDelete, fileTransfer, fileFmtSize, fileFmtTime,
       // Compose
       composeProjects, composeLoading, composeSearch, composePage, composePageSize,
       composeSortKey, composeSortOrder, toggleComposeSort,

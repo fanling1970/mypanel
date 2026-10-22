@@ -15,10 +15,16 @@ services:
       # 数据分区根为 /mnt/mmcblk0p27；如与你路由器实际路径不同，改 ${COMPOSE_ROOT:-...} / ${COMPOSE_VOLUME_ROOT:-...} 默认值即可。
       - ${COMPOSE_ROOT:-/mnt/mmcblk0p27/docker}:/host/compose
       - ${COMPOSE_VOLUME_ROOT:-/mnt/mmcblk0p27}:/host-vol1
+      # 下面这个挂载是给面板的\"文件管理\"功能用的（浏览路由器全部文件，非容器内文件）：
+      # 把宿主机根目录只读方式挂进来即可浏览/上传/删除；如只想开放某个分区，
+      # 改成 - ${HOST_ROOT:-/}:/host-root 里把左边换成具体目录（如 /mnt/mmcblk0p27）。
+      - ${HOST_ROOT:-/}:/host-root
     environment:
       - TZ=Asia/Shanghai
       - DB_PATH=/data/mypanel.db
       - APP_PORT=8383         # 容器内监听端口，与 ports 右边保持一致
       - COMPOSE_ROOT_HOST=${COMPOSE_ROOT:-/mnt/mmcblk0p27/docker}
       - COMPOSE_VOLUME_ROOT_HOST=${COMPOSE_VOLUME_ROOT:-/mnt/mmcblk0p27}
+      - HOST_ROOT_HOST=${HOST_ROOT:-/}
+      - HOST_ROOT_MOUNT=/host-root
     restart: unless-stopped

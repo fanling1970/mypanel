@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.005"
+APP_VERSION = "2.7.3.006"
 
 import asyncio
 import json
@@ -25,6 +25,7 @@ from modules import compose_project
 from modules import scheduler as sched
 from modules import update_checker
 from modules import cache
+from modules import file_manager
 from modules.snapshot import SnapshotCollector
 
 from starlette.middleware.gzip import GZipMiddleware
@@ -1765,3 +1766,146 @@ async def get_ports_usage():
     """扫描宿主端口占用（系统监听 + 所有容器映射），方便创建 Compose 选未占用端口"""
     data = await asyncio.to_thread(docker_client.get_port_usage)
     return {"success": True, "data": data}
+
+
+# ============ 路由器文件管理（宿主机文件，非容器内文件） ============
+
+class FileMkdirRequest(BaseModel):
+    path: str = "/"          # 目标目录（宿主机绝对路径）
+    name: str = ""           # 新建的名称
+
+
+class FileRenameRequest(BaseModel):
+    path: str = ""           # 待重命名的宿主机路径
+    new_name: str = ""
+
+
+class FilePermissionRequest(BaseModel):
+    path: str = ""
+    mode: str = "755"
+
+
+class FilePathsRequest(BaseModel):
+    paths: list[str] = []
+    dest: str = "/"          # 复制/移动的目标目录
+
+
+@app.get("/api/files/roots")
+async def files_roots():
+    """可浏览的宿主机根挂载点 + 磁盘占用"""
+    try:
+        data = await asyncio.to_thread(file_manager.get_roots)
+        return {"success": True, "data": data}
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/files/list")
+async def files_list(path: str = Query("/", description="宿主机绝对路径"),
+                     hidden: bool = Query(True, description="是否显示隐藏文件")):
+    """列出宿主机目录内容"""
+    try:
+        data = await asyncio.to_thread(file_manager.list_dir, path, hidden)
+        return {"success": True, "data": data}
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/mkdir")
+async def files_mkdir(req: FileMkdirRequest):
+    """新建文件夹"""
+    try:
+        data = await asyncio.to_thread(file_manager.make_dir, req.path, req.name)
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/newfile")
+async def files_newfile(req: FileMkdirRequest):
+    """新建空文件"""
+    try:
+        data = await asyncio.to_thread(file_manager.make_file, req.path, req.name, "")
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/rename")
+async def files_rename(req: FileRenameRequest):
+    """重命名"""
+    try:
+        data = await asyncio.to_thread(file_manager.rename, req.path, req.new_name)
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/permission")
+async def files_permission(req: FilePermissionRequest):
+    """修改权限（八进制 chmod）"""
+    try:
+        data = await asyncio.to_thread(file_manager.set_permission, req.path, req.mode)
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/delete")
+async def files_delete(req: FilePathsRequest):
+    """删除（支持多选）"""
+    try:
+        data = await asyncio.to_thread(file_manager.delete, req.paths)
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/copy")
+async def files_copy(req: FilePathsRequest):
+    """复制到目标目录（支持多选）"""
+    try:
+        data = await asyncio.to_thread(file_manager.copy, req.paths, req.dest)
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/move")
+async def files_move(req: FilePathsRequest):
+    """移动到目标目录（支持多选）"""
+    try:
+        data = await asyncio.to_thread(file_manager.move, req.paths, req.dest)
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/upload")
+async def files_upload(path: str = Query("/", description="目标目录宿主机路径"),
+                       overwrite: bool = Query(False, description="是否覆盖同名文件"),
+                       file: UploadFile = File(...)):
+    """上传文件到宿主机目录"""
+    try:
+        data = await asyncio.to_thread(
+            file_manager.save_upload, path, file.filename, file.file, overwrite
+        )
+        return data
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/files/download")
+async def files_download(path: str = Query(..., description="宿主机文件路径")):
+    """下载宿主机文件（浏览器原生下载不带请求头，走 ?token= 鉴权）"""
+    from fastapi.responses import FileResponse as _FileResponse
+    try:
+        cont, fname = await asyncio.to_thread(file_manager.resolve_download, path)
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _FileResponse(cont, filename=fname, media_type="application/octet-stream")
