@@ -17,9 +17,9 @@ services:
       - /etc/docker/daemon.json:/etc/docker/daemon.json
       - ${COMPOSE_ROOT:-/mnt/mmcblk0p27/docker}:/host/compose
       - ${COMPOSE_VOLUME_ROOT:-/mnt/mmcblk0p27}:/host-vol1
-      # 下面这个挂载是给面板的\"文件管理\"功能用的（浏览路由器全部文件，非容器内文件）：
-      # 把宿主机根目录只读方式挂进来即可浏览/上传/删除；如只想开放某个分区，
-      # 改成 - ${HOST_ROOT:-/}:/host-root 里把左边换成具体目录（如 /mnt/mmcblk0p27）。
+      # 下面这个挂载是给面板的「文件管理」功能用的：浏览路由器全部文件（不是容器内文件）。
+      # 默认把宿主机根目录挂进来；如只想开放某个分区，把 ${HOST_ROOT} 改成该目录即可
+      # （例如 ${HOST_ROOT:-/mnt/mmcblk0p27}），改完需 docker compose up -d 重建容器。
       - ${HOST_ROOT:-/}:/host-root
     environment:
       - TZ=Asia/Shanghai
