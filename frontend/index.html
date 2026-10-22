@@ -793,7 +793,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <el-form :model="createForm" label-width="110px" label-position="right">
             <el-form-item label="镜像名" required>
               <el-input v-model="createForm.image" placeholder="例如: nginx:latest 或使用镜像管理中的镜像标签名"></el-input>
-              <div style="font-size:12px;color:var(--text-dim);line-height:1.5;margin-top:4px;">💡 镜像不存在时会提示，可先到「镜像管理」拉取</div>
+              <div style="font-size:12px;color:var(--text-dim);line-height:1.5;margin-top:4px;">💡 本地没有该镜像时会自动拉取，无需先去镜像管理手动拉取</div>
             </el-form-item>
             <el-form-item label="容器名">
               <el-input v-model="createForm.name" placeholder="留空则自动生成，例如: my-nginx"></el-input>
@@ -997,6 +997,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <el-button @click="createComposeDialogVisible = false">取消</el-button>
               <el-button type="success" :loading="composeCreating" @click="submitCreateCompose">创建并启动</el-button>
             </div>
+          </template>
+        </el-dialog>
+
+        <!-- 拉取镜像弹窗 -->
+        <el-dialog v-model="imagePullDialogVisible" title="拉取镜像" width="520px" :append-to-body="true" destroy-on-close>
+          <el-form label-width="90px" label-position="right">
+            <el-form-item label="镜像名">
+              <el-input v-model="imagePullInput" class="mono-input" placeholder="例如: nginx:latest 或 ghcr.io/owner/app:1.0"
+                @keyup.enter="submitPullImage"></el-input>
+              <div style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:6px;">
+                💡 不写标签默认 latest；国内拉取慢可先到「⚡ 加速器」配置镜像加速地址
+              </div>
+            </el-form-item>
+          </el-form>
+          <template #footer>
+            <el-button @click="imagePullDialogVisible = false">取消</el-button>
+            <el-button type="success" :loading="imagePulling" @click="submitPullImage">开始拉取</el-button>
           </template>
         </el-dialog>
 
@@ -1224,6 +1241,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <div style="display: flex; align-items: center; gap: 8px;">
               <el-button type="danger" plain @click="cleanupUnusedImages" :loading="imagesCleaning" size="default">批量清理</el-button>
               <el-button @click="mirrorsDialogVisible = true; loadMirrors()" size="default">⚡ 加速器</el-button>
+              <el-button type="success" plain @click="openPullImageDialog" size="default">⬇ 拉取镜像</el-button>
               <el-button @click="imageImportInput.click()" size="default">📥 导入</el-button>
               <input ref="imageImportInput" type="file" accept=".tar,.tar.gz,.tgz" style="display:none;" @change="onImageImport">
               <el-button type="primary" @click="loadImages({ force: true })" :loading="imagesLoading" size="default">刷新</el-button>
@@ -1264,10 +1282,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
                 <span style="font-size: 13px; color: var(--text-secondary);">{{ formatTime(row.created) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="80" fixed="right">
+            <el-table-column label="操作" width="130" fixed="right">
               <template #default="{ row }">
+                <el-button v-if="row.has_tag" type="primary" size="small" link
+                  @click="exportImage(row)" :loading="imageExporting === imageExportTarget(row)">导出</el-button>
                 <el-button v-if="!row.is_used || !row.has_tag" type="danger" size="small" link @click="deleteImage(row)" :loading="row._deleting">删除</el-button>
-                <span v-else style="color: var(--text-dim); font-size: 12px;">-</span>
+                <span v-if="row.is_used && row.has_tag" style="color: var(--text-dim); font-size: 12px;">使用中</span>
               </template>
             </el-table-column>
           </el-table>
@@ -2276,7 +2296,7 @@ const app = createApp({
       createForm.command = cfg.command || '';
       createForm.ports = (cfg.ports || []).join('\n');
       createForm.env = (cfg.env || []).join('\n');
-      createForm.volumes = (cfg.volumes || []).join('\n');
+      createForm.volumes = (cfg.volumes || []).map(normalizeVolumeSource).join('\n');
       createForm.network_mode = cfg.network_mode || 'bridge';
       createForm.restart_policy = cfg.restart_policy || 'no';
       createForm.privileged = !!cfg.privileged;
@@ -2330,6 +2350,76 @@ const app = createApp({
         }
       } catch (e) { console.error(e); ElementPlus.ElMessage.error('创建容器请求失败'); }
       createSubmitting.value = false;
+    }
+
+    // ============ 拉取镜像 ============
+    function openPullImageDialog() {
+      imagePullInput.value = '';
+      imagePullDialogVisible.value = true;
+    }
+    async function submitPullImage() {
+      const img = String(imagePullInput.value || '').trim();
+      if (!img) { ElementPlus.ElMessage.warning('请输入镜像名'); return; }
+      imagePulling.value = true;
+      try {
+        const res = await apiFetch('/api/images/pull', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: img }),
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (res.ok && data.success) {
+          ElementPlus.ElMessage.success(data.message || '拉取完成');
+          imagePullDialogVisible.value = false;
+          await loadImages({ force: true });
+        } else {
+          ElementPlus.ElMessage.error(data.detail || data.message || '拉取失败');
+        }
+      } catch (e) {
+        console.error(e);
+        ElementPlus.ElMessage.error('拉取请求失败');
+      } finally {
+        imagePulling.value = false;
+      }
+    }
+
+    // ============ 导出镜像 ============
+    function imageExportTarget(row) {
+      if (!row) return '';
+      const tags = row.tags || [];
+      if (tags.length) return tags[0];
+      const rt = row.repo_tags || [];
+      if (rt.length && rt[0].repo) return rt[0].repo + ':' + (rt[0].tag || 'latest');
+      return row.id || '';
+    }
+    async function exportImage(row) {
+      const target = imageExportTarget(row);
+      if (!target) { ElementPlus.ElMessage.warning('无法确定镜像名'); return; }
+      imageExporting.value = target;
+      try {
+        const res = await apiFetch('/api/images/export', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: target }),
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.success) {
+          ElementPlus.ElMessage.error(data.detail || data.message || '导出失败');
+          return;
+        }
+        const a = document.createElement('a');
+        a.href = data.download_url;
+        a.download = data.filename || '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        ElementPlus.ElMessage.success('导出完成，已开始下载 ' + (data.filename || ''));
+      } catch (e) {
+        console.error(e);
+        ElementPlus.ElMessage.error('导出请求失败');
+      } finally {
+        imageExporting.value = '';
+      }
     }
 
     // ============ 删除容器 ============
@@ -2823,6 +2913,10 @@ const app = createApp({
     const images = ref([]);
     const imagesLoading = ref(false);
     const imagesCleaning = ref(false);
+    const imagePullDialogVisible = ref(false);
+    const imagePullInput = ref('');
+    const imagePulling = ref(false);
+    const imageExporting = ref('');
     const imageFilter = ref('all');
     const usedImageCount = computed(() => images.value.filter(i => i.is_used).length);
     const unusedImageCount = computed(() => images.value.filter(i => !i.is_used).length);
@@ -3060,6 +3154,24 @@ const app = createApp({
     }
 
     // ============ docker run → compose 转换 ============
+    // docker/compose 都不做 shell 展开：$(pwd)/data → ./data
+    function normalizeVolumeSource(v) {
+      let s = String(v == null ? '' : v).trim();
+      if (!s) return s;
+      const idx = s.indexOf(':');
+      let src = idx > 0 ? s.slice(0, idx) : s;
+      const rest = idx > 0 ? s.slice(idx) : '';
+      const tokens = ['$(pwd)', '$(PWD)', '${PWD}', '${pwd}', '$PWD'];
+      for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (src.indexOf(t) === 0) {
+          const tail = src.slice(t.length).replace(/^\/+/, '');
+          src = tail ? './' + tail : '.';
+          break;
+        }
+      }
+      return src + rest;
+    }
     function yamlQuote(v) {
       const s = String(v == null ? '' : v);
       if (s === '') return "''";
@@ -3093,7 +3205,7 @@ const app = createApp({
       }
       if (cfg.volumes && cfg.volumes.length) {
         lines.push('    volumes:');
-        cfg.volumes.forEach(function (v) { lines.push('      - ' + yamlQuote(v)); });
+        cfg.volumes.forEach(function (v) { lines.push('      - ' + yamlQuote(normalizeVolumeSource(v))); });
       }
       if (cfg.restart_policy) lines.push('    restart: ' + yamlQuote(cfg.restart_policy));
       if (cfg.privileged) lines.push('    privileged: true');
@@ -3510,6 +3622,7 @@ const app = createApp({
       totalImageSizeMB, unusedImageSizeMB,
       loadImages, deleteImage, cleanupUnusedImages,
       mirrorsDialogVisible, mirrorsLoading, mirrorsSaving, mirrorsPath, mirrorsExists, mirrorList, newMirror, loadMirrors, addMirror, saveMirrors, imageImportInput, onImageImport,
+      imagePullDialogVisible, imagePullInput, imagePulling, imageExporting, openPullImageDialog, submitPullImage, imageExportTarget, exportImage,
       // Compose
       composeProjects, composeLoading, composeSearch, composePage, composePageSize,
       composeSortKey, composeSortOrder, toggleComposeSort,

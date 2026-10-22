@@ -483,6 +483,40 @@ def remove_container(container_id: str, force: bool = False) -> dict:
         return {"success": False, "message": f"删除失败: {str(e)}"}
 
 
+# 容器 bind 卷的相对路径基准（与 compose 保持一致：/vol1/1000/Docker）
+CONTAINER_VOLUME_BASE_HOST = os.environ.get("COMPOSE_ROOT_HOST", "/vol1/1000/Docker")
+
+_PWD_TOKENS = ("$(pwd)", "$(PWD)", "${PWD}", "${pwd}", "$PWD")
+
+
+def normalize_container_volume_source(src: str, container_name: str = "", image: str = "") -> str:
+    """把容器创建时的卷源路径规范成宿主机绝对路径
+
+    docker 不展开 shell 变量，$(pwd) 会原样当成路径名导致挂载位置错误。
+    相对路径 / $(pwd) 统一解析到 <CONTAINER_VOLUME_BASE_HOST>/<容器名或镜像名>/ 下。
+    """
+    s = str(src or "").strip()
+    if not s:
+        return s
+    # 命名卷（不含 / . ~ $ 开头）保持原样
+    if s[0] not in "/.~$":
+        return s
+    for tok in _PWD_TOKENS:
+        if s.startswith(tok):
+            s = "./" + s[len(tok):].lstrip("/")
+            break
+    if s.startswith("~"):
+        return os.path.expanduser(s)
+    if not (s.startswith("./") or s.startswith("../") or s in (".", "..")):
+        return s
+    base_name = str(container_name or "").strip()
+    if not base_name:
+        base_name = str(image or "").strip().split("/")[-1].split(":")[0] or "container"
+    base_name = "".join(ch if (ch.isalnum() or ch in "-_.") else "-" for ch in base_name).strip("-") or "container"
+    base = os.path.join(CONTAINER_VOLUME_BASE_HOST, base_name)
+    return os.path.normpath(os.path.join(base, s))
+
+
 def create_container(config: dict) -> dict:
     """创建并启动容器
 
@@ -503,6 +537,22 @@ def create_container(config: dict) -> dict:
         image = str(config.get("image", "")).strip()
         if not image:
             return {"success": False, "message": "镜像名不能为空"}
+
+        # 本地没有该镜像时自动拉取，避免用户先去镜像管理手动拉取
+        try:
+            client.images.get(image)
+        except docker.errors.ImageNotFound:
+            logger.info(f"本地无镜像 {image}，开始自动拉取")
+            try:
+                client.images.pull(image)
+                logger.info(f"镜像 {image} 拉取完成")
+            except Exception as pull_err:
+                return {
+                    "success": False,
+                    "message": f"镜像 {image} 不存在且自动拉取失败: {pull_err}",
+                }
+        except Exception as get_err:
+            logger.warning(f"检查镜像 {image} 失败（将继续尝试创建）: {get_err}")
 
         # 解析端口映射: "8080:80" / "127.0.0.1:8080:80" / "53:53/udp"
         ports = {}
@@ -549,6 +599,9 @@ def create_container(config: dict) -> dict:
                 return {"success": False, "message": f"卷挂载格式错误: {item}（示例: /vol1/data:/data）"}
             if not host_path or not container_path:
                 return {"success": False, "message": f"卷挂载格式错误: {item}（示例: /vol1/data:/data）"}
+            host_path = normalize_container_volume_source(
+                host_path, config.get("name", ""), config.get("image", "")
+            )
             volumes[host_path] = {"bind": container_path, "mode": mode}
 
         network_mode = str(config.get("network_mode", "bridge")).strip() or "bridge"
@@ -1942,6 +1995,42 @@ def load_image_from_file(tar_path: str) -> dict:
         return {"success": False, "message": "导入超时（10分钟）"}
     except Exception as e:
         return {"success": False, "message": f"导入失败: {e}"}
+
+
+def pull_image(image_name: str) -> dict:
+    """拉取镜像（docker pull）"""
+    image_name = str(image_name or "").strip()
+    if not image_name:
+        return {"success": False, "message": "镜像名不能为空"}
+    client = get_client()
+    try:
+        client.images.pull(image_name)
+        return {"success": True, "message": f"镜像 {image_name} 拉取完成"}
+    except docker.errors.NotFound:
+        return {"success": False, "message": f"镜像不存在: {image_name}"}
+    except Exception as e:
+        return {"success": False, "message": f"拉取失败: {e}"}
+
+
+def export_image(image_name: str, tar_path: str) -> dict:
+    """导出镜像为 tar 文件（docker save）"""
+    import subprocess
+    image_name = str(image_name or "").strip()
+    if not image_name:
+        return {"success": False, "message": "镜像名不能为空"}
+    try:
+        result = subprocess.run(
+            ["docker", "save", "-o", tar_path, image_name],
+            capture_output=True, text=True, timeout=1800,
+        )
+        output = (result.stdout + result.stderr).strip()
+        if result.returncode == 0:
+            return {"success": True, "path": tar_path, "message": "导出成功"}
+        return {"success": False, "message": f"导出失败: {output[-300:]}"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "message": "导出超时（30分钟）"}
+    except Exception as e:
+        return {"success": False, "message": f"导出失败: {e}"}
 
 
 def get_port_usage() -> dict:

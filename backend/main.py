@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.003"
+APP_VERSION = "2.7.3.004"
 
 import asyncio
 import json
@@ -1414,6 +1414,69 @@ async def import_image(file: UploadFile = File(...)):
             os.remove(tmp_path)
         except Exception:
             pass
+
+
+class ImagePullRequest(BaseModel):
+    """拉取镜像请求"""
+    image: str = ""
+
+
+@app.post("/api/images/pull")
+async def pull_image(req: ImagePullRequest):
+    """拉取镜像（docker pull）"""
+    image = (req.image or "").strip()
+    if not image:
+        raise HTTPException(status_code=400, detail="镜像名不能为空")
+    result = await asyncio.to_thread(docker_client.pull_image, image)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "拉取失败")
+    cache.invalidate("images")
+    return result
+
+
+@app.post("/api/images/export")
+async def export_image(req: ImagePullRequest):
+    """导出镜像为 tar 文件（docker save），完成后返回下载地址"""
+    image = (req.image or "").strip()
+    if not image:
+        raise HTTPException(status_code=400, detail="镜像名不能为空")
+    safe = "".join(ch if (ch.isalnum() or ch in "-_.") else "_" for ch in image)
+    out_dir = os.environ.get("IMAGE_EXPORT_DIR", "/tmp/image_exports")
+    os.makedirs(out_dir, exist_ok=True)
+    tar_path = os.path.join(out_dir, f"{safe}_{int(time.time())}.tar")
+    result = await asyncio.to_thread(docker_client.export_image, image, tar_path)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "导出失败")
+    fname = os.path.basename(tar_path)
+    return {"success": True, "message": "导出成功", "filename": fname,
+            "download_url": f"/api/images/export/download?name={fname}"}
+
+
+@app.get("/api/images/export/download")
+async def download_exported_image(name: str = Query(..., description="导出文件名")):
+    """下载已导出的镜像 tar 文件"""
+    from fastapi.responses import FileResponse as _FileResponse
+    safe = os.path.basename(name or "")
+    out_dir = os.environ.get("IMAGE_EXPORT_DIR", "/tmp/image_exports")
+    path = os.path.join(out_dir, safe)
+    if not safe or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="导出文件不存在或已过期")
+    return _FileResponse(path, media_type="application/x-tar", filename=safe)
+
+
+@app.delete("/api/images/export")
+async def delete_exported_image(name: str = Query(..., description="导出文件名")):
+    """删除已导出的镜像 tar 文件（释放空间）"""
+    safe = os.path.basename(name or "")
+    out_dir = os.environ.get("IMAGE_EXPORT_DIR", "/tmp/image_exports")
+    path = os.path.join(out_dir, safe)
+    try:
+        if safe and os.path.isfile(path):
+            os.remove(path)
+            return {"success": True, "message": "已删除"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+    return {"success": True, "message": "文件不存在"}
 
 
 # ============ Compose 项目管理 API ============
