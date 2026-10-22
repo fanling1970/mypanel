@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.004"
+APP_VERSION = "2.7.3.005"
 
 import asyncio
 import json
@@ -1443,6 +1443,16 @@ async def export_image(req: ImagePullRequest):
     safe = "".join(ch if (ch.isalnum() or ch in "-_.") else "_" for ch in image)
     out_dir = os.environ.get("IMAGE_EXPORT_DIR", "/tmp/image_exports")
     os.makedirs(out_dir, exist_ok=True)
+    # 清理该镜像此前导出的旧 tar，避免重复点击产生大量残留文件占满磁盘
+    try:
+        for old in os.listdir(out_dir):
+            if old.startswith(safe + "_") and old.endswith(".tar"):
+                try:
+                    os.remove(os.path.join(out_dir, old))
+                except Exception:
+                    pass
+    except Exception:
+        pass
     tar_path = os.path.join(out_dir, f"{safe}_{int(time.time())}.tar")
     result = await asyncio.to_thread(docker_client.export_image, image, tar_path)
     if not result.get("success"):

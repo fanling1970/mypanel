@@ -2407,9 +2407,16 @@ const app = createApp({
           ElementPlus.ElMessage.error(data.detail || data.message || '导出失败');
           return;
         }
+        // 浏览器原生下载不会携带 Authorization 头，认证中间件会返回 401（页面提示“需要授权”），
+        // 因此把 token 拼到查询参数上（与 SSE 一致，后端中间件已支持 ?token=）
+        let dlUrl = data.download_url || '';
+        if (authToken.value) {
+          dlUrl += (dlUrl.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(authToken.value);
+        }
         const a = document.createElement('a');
-        a.href = data.download_url;
+        a.href = dlUrl;
         a.download = data.filename || '';
+        a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
