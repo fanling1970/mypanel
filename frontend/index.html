@@ -1343,8 +1343,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           </div>
           <div class="container-table-wrap">
             <el-table :data="filteredFileEntries" stripe style="width: 100%;" v-loading="fileLoading"
-              row-key="path" empty-text="空目录" @selection-change="onFileSelectionChange">
-              <el-table-column type="selection" width="42" />
+              row-key="path" empty-text="空目录">
+              <el-table-column width="48" align="center" class-name="file-check-col">
+                <template #header>
+                  <el-checkbox :model-value="fileAllChecked" :indeterminate="fileIndeterminate" @change="fileToggleAll" />
+                </template>
+                <template #default="{ row }">
+                  <el-checkbox :model-value="isFileChecked(row)" @change="function(){ fileToggleRow(row); }" />
+                </template>
+              </el-table-column>
               <el-table-column label="名称" min-width="220">
                 <template #default="{ row }">
                   <span style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;" @click="fileOpen(row)">
@@ -1369,7 +1376,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
                   <span style="font-size: 13px; color: var(--text-secondary);">{{ fileFmtTime(row.mtime) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="240" fixed="right">
+              <el-table-column label="操作" width="240">
                 <template #default="{ row }">
                   <el-button type="primary" size="small" link @click="fileOpen(row)">{{ row.is_dir ? '打开' : '下载' }}</el-button>
                   <el-button size="small" link @click="fileCopyPath(row)">复制路径</el-button>
@@ -3026,6 +3033,34 @@ const app = createApp({
       return fileEntries.value.filter(e => (e.name || '').toLowerCase().indexOf(kw) >= 0);
     });
 
+    const fileSelectedPaths = computed(() => (fileSelected.value || []).map(r => r.path));
+
+    function isFileChecked(row) {
+      return !!row && fileSelectedPaths.value.indexOf(row.path) >= 0;
+    }
+
+    function fileToggleRow(row) {
+      if (!row) return;
+      const list = (fileSelected.value || []).slice();
+      const i = list.findIndex(r => r.path === row.path);
+      if (i >= 0) list.splice(i, 1); else list.push(row);
+      fileSelected.value = list;
+    }
+
+    function fileToggleAll(val) {
+      fileSelected.value = val ? filteredFileEntries.value.slice() : [];
+    }
+
+    const fileAllChecked = computed(() => {
+      const list = filteredFileEntries.value || [];
+      return list.length > 0 && fileSelected.value.length === list.length;
+    });
+
+    const fileIndeterminate = computed(() => {
+      const n = fileSelected.value.length;
+      return n > 0 && n < (filteredFileEntries.value || []).length;
+    });
+
     const fileParentPath = computed(() => {
       const p = fileCurrentPath.value || '/';
       if (p === '/') return null;
@@ -3090,6 +3125,7 @@ const app = createApp({
         }
         const d = data.data || {};
         fileEntries.value = d.entries || [];
+        fileSelected.value = [];
         fileCurrentPath.value = d.path || '/';
         fileDisk.value = d.disk || null;
         if (d.roots && d.roots.length) fileRoots.value = d.roots;
@@ -3141,7 +3177,6 @@ const app = createApp({
       fileDownload([row]);
     }
 
-    function onFileSelectionChange(rows) { fileSelected.value = rows || []; }
 
     async function fileNewFolder() {
       let name = '';
@@ -4065,7 +4100,7 @@ const app = createApp({
       fileRoots, fileCurrentPath, fileEntries, fileLoading, fileUploading, fileKeyword, fileSelected,
       fileDisk, fileImportInput, fileHistory, fileHistoryPos, filteredFileEntries, fileParentPath,
       fileBreadcrumbs, onMainTabChange, loadFiles, fileRefresh, fileGoUp, fileBack, fileForward,
-      fileOpen, onFileSelectionChange, fileNewFolder, fileNewFile, filePickUpload, onFileUpload,
+      fileOpen, isFileChecked, fileToggleRow, fileToggleAll, fileAllChecked, fileIndeterminate, fileNewFolder, fileNewFile, filePickUpload, onFileUpload,
       fileDownload, fileCopyPath, fileRename, fileEditPermission, fileDelete, fileTransfer, fileFmtSize, fileFmtTime,
       // Compose
       composeProjects, composeLoading, composeSearch, composePage, composePageSize,
