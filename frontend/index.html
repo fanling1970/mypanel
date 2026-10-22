@@ -936,6 +936,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
         <!-- 新建 Compose 项目弹窗 -->
         <el-dialog v-model="createComposeDialogVisible" title="新建 Compose 项目" width="680px" :append-to-body="true" top="4vh" destroy-on-close>
+          <el-tabs v-model="createComposeTab" style="margin-top:-8px;">
+          <el-tab-pane label="填写 compose" name="form">
           <el-form :model="createComposeForm" label-width="100px" label-position="right">
             <el-form-item label="项目目录" required>
               <div style="display:flex;gap:8px;width:100%;">
@@ -969,9 +971,32 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               </div>
             </el-form-item>
           </el-form>
+          </el-tab-pane>
+          <el-tab-pane label="使用 docker run 创建" name="cmd">
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:8px;">
+              粘贴完整的 <code>docker run</code> 命令，点击「确定」后会自动转换为 compose 内容并回到上一页。
+            </div>
+            <el-input type="textarea" v-model="composeDockerRunCmd" :rows="10" class="mono-textarea"
+              placeholder="粘贴命令，例如:&#10;docker run -d --name my-nginx --restart unless-stopped -p 8080:80 -e TZ=Asia/Shanghai -v /vol1/1000/Docker/nginx/html:/usr/share/nginx/html nginx:latest"></el-input>
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+              <el-button size="small" type="info" plain @click="fillComposeDockerRunExample">填入示例</el-button>
+            </div>
+            <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-top:10px;">
+              ⚠️ 可识别参数：<code>-d</code> <code>--name</code> <code>-p/--publish</code> <code>-e/--env</code>
+              <code>-v/--volume</code> <code>--network</code> <code>--restart</code> <code>--privileged</code><br>
+              镜像之后的参数会作为 <code>command</code>；未识别的参数会被忽略并提示。
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+              <el-button @click="cancelComposeDockerRun">取消</el-button>
+              <el-button type="success" @click="applyComposeDockerRun">确定</el-button>
+            </div>
+          </el-tab-pane>
+          </el-tabs>
           <template #footer>
-            <el-button @click="createComposeDialogVisible = false">取消</el-button>
-            <el-button type="success" :loading="composeCreating" @click="submitCreateCompose">创建并启动</el-button>
+            <div v-if="createComposeTab === 'form'" style="display:flex;justify-content:flex-end;gap:8px;">
+              <el-button @click="createComposeDialogVisible = false">取消</el-button>
+              <el-button type="success" :loading="composeCreating" @click="submitCreateCompose">创建并启动</el-button>
+            </div>
           </template>
         </el-dialog>
 
@@ -3034,8 +3059,83 @@ const app = createApp({
       row._loading = false;
     }
 
+    // ============ docker run → compose 转换 ============
+    function yamlQuote(v) {
+      const s = String(v == null ? '' : v);
+      if (s === '') return "''";
+      if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(s)) return s;
+      return "'" + s.split("'").join("''") + "'";
+    }
+    function sanitizeServiceName(name) {
+      let s = String(name || 'app').trim().toLowerCase();
+      s = s.replace(/[^a-z0-9_.-]/g, '-');
+      if (!/^[a-z0-9]/.test(s)) s = 'svc-' + s;
+      return s || 'app';
+    }
+    // 把 docker run 解析结果转成可用的 compose 内容
+    function dockerRunToComposeYaml(cfg) {
+      const image = String(cfg.image || '');
+      const baseName = image.split('/').pop().split(':')[0] || 'app';
+      const svc = sanitizeServiceName(cfg.name || baseName);
+      const lines = [];
+      const tail = [];
+      lines.push('services:');
+      lines.push('  ' + svc + ':');
+      lines.push('    image: ' + yamlQuote(image));
+      if (cfg.name) lines.push('    container_name: ' + yamlQuote(cfg.name));
+      if (cfg.ports && cfg.ports.length) {
+        lines.push('    ports:');
+        cfg.ports.forEach(function (p) { lines.push('      - ' + yamlQuote(p)); });
+      }
+      if (cfg.env && cfg.env.length) {
+        lines.push('    environment:');
+        cfg.env.forEach(function (e) { lines.push('      - ' + yamlQuote(e)); });
+      }
+      if (cfg.volumes && cfg.volumes.length) {
+        lines.push('    volumes:');
+        cfg.volumes.forEach(function (v) { lines.push('      - ' + yamlQuote(v)); });
+      }
+      if (cfg.restart_policy) lines.push('    restart: ' + yamlQuote(cfg.restart_policy));
+      if (cfg.privileged) lines.push('    privileged: true');
+      if (cfg.command) lines.push('    command: ' + yamlQuote(cfg.command));
+      const net = String(cfg.network_mode || '').trim();
+      if (net === 'host' || net === 'none') {
+        lines.push('    network_mode: ' + net);
+      } else if (net && net !== 'bridge') {
+        lines.push('    networks:');
+        lines.push('      - ' + yamlQuote(net));
+        tail.push('');
+        tail.push('networks:');
+        tail.push('  ' + yamlQuote(net) + ':');
+        tail.push('    external: true');
+      }
+      return lines.concat(tail).join('\n') + '\n';
+    }
+    function applyComposeDockerRun() {
+      const cfg = parseDockerRunCommand(composeDockerRunCmd.value);
+      if (cfg.error) { ElementPlus.ElMessage.warning(cfg.error); return; }
+      createComposeForm.yaml = dockerRunToComposeYaml(cfg);
+      if (!String(createComposeForm.project_name || '').trim() && cfg.name) {
+        createComposeForm.project_name = cfg.name;
+      }
+      createComposeTab.value = 'form';
+      if (cfg.extra && cfg.extra.length) {
+        ElementPlus.ElMessage.warning('已转换为 compose，但以下参数未写入: ' + cfg.extra.join(' '));
+      } else {
+        ElementPlus.ElMessage.success('已转换为 compose 内容，请核对后创建');
+      }
+    }
+    function cancelComposeDockerRun() {
+      createComposeTab.value = 'form';
+    }
+    function fillComposeDockerRunExample() {
+      composeDockerRunCmd.value = 'docker run -d --name my-nginx --restart unless-stopped -p 8080:80 -e TZ=Asia/Shanghai -v /vol1/1000/Docker/nginx/html:/usr/share/nginx/html nginx:latest';
+    }
+
     // ============ 新建 Compose 项目 ============
     const createComposeDialogVisible = ref(false);
+    const createComposeTab = ref('form');
+    const composeDockerRunCmd = ref('');
     const composeCreating = ref(false);
     const composeDirs = ref([]);
     const composeRootHint = ref('/vol1/1000/Docker');
@@ -3128,6 +3228,7 @@ const app = createApp({
     }
     async function openCreateCompose() {
       createComposeForm.dir_name = ''; createComposeForm.project_name = ''; createComposeForm.yaml = ''; createComposeForm.description = '';
+      createComposeTab.value = 'form'; composeDockerRunCmd.value = '';
       createComposeDialogVisible.value = true;
       try {
         const res = await apiFetch('/api/compose/dirs');
@@ -3418,6 +3519,7 @@ const app = createApp({
       loadComposeProjects, handleComposeAction, openComposeDetail, openComposeScheduleManager,
       openCreateCompose, submitCreateCompose, handleDeleteCompose, composeDirs, composeRootHint,
       createComposeDialogVisible, createComposeForm, composeCreating, onYamlFileSelect, onYamlFileChange, fillComposeTemplate, yamlFileInput,
+      createComposeTab, composeDockerRunCmd, applyComposeDockerRun, cancelComposeDockerRun, fillComposeDockerRunExample,
       browseDirDialogVisible, browseTreeRef, browseSelectedPath, browseCurrentPath, browseParentPath, browseTreeKey, openBrowseDir, loadBrowseNode, onBrowseNodeClick, browseGoUp, browseMkdir, confirmBrowseDir,
       composeLogDialogVisible, composeLogText,
       portUsageDialogVisible, portUsageData, portUsageLoading, loadPortUsage,
