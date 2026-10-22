@@ -283,25 +283,46 @@ def mkdir_dir(host_path: str, name: str) -> dict:
         return {"success": False, "message": f"创建失败: {e}"}
 
 
-def _fix_volume_paths(yaml_text: str, project_dir: str, host_project_dir: str, host_dirs: list | None = None) -> str:
-    """把 YAML 中相对路径的 bind 卷（- ./data:/data）转成宿主机绝对路径
+# compose 文件不做 shell 展开：$(pwd) / ${PWD} / $PWD 必须由面板先换成真实路径，
+# 否则会被 docker compose 当成"未定义的命名卷"而报错。
+_PWD_TOKENS = ("$(pwd)", "$(PWD)", "${PWD}", "${pwd}", "$PWD")
 
-    Args:
-        yaml_text: compose 内容
-        project_dir: 容器内项目目录（用于在挂载内创建目录/改权限）
-        host_project_dir: 宿主机真实项目目录（写进 compose 文件的路径前缀）
-        host_dirs: 收集容器内目录路径（供创建目录/权限处理）
+
+def _fix_volume_paths(yaml_text: str, project_dir: str, host_project_dir: str, host_dirs: list | None = None) -> str:
+    """把 YAML 中 bind 卷的源路径统一换成宿主机绝对路径
+
+    支持三种写法（可带引号）：
+        - ./data:/app/data              → 相对项目目录
+        - $(pwd)/data:/app/data         → 相对项目目录（compose 不展开 shell）
+        - /abs/path/data:/app/data      → 原样保留
     """
-    pattern = re.compile(r"^(\s*-\s+)(\.\.?/[^\s:]+)(:.*)?$", re.MULTILINE)
+    # 匹配列表项：缩进 + "- " + 可选引号 + 内容 + 可选引号
+    pattern = re.compile(r"^(\s*-\s+)(['\"]?)(.*?)\2\s*$", re.MULTILINE)
 
     def repl(m: re.Match) -> str:
-        indent, first, rest = m.group(1), m.group(2), m.group(3) or ""
-        host = os.path.normpath(os.path.join(host_project_dir, first))
+        indent, body = m.group(1), m.group(3)
+        # 只处理 bind 挂载（含 host:container 的冒号）
+        if ":" not in body:
+            return m.group(0)
+        src, sep, dst = body.partition(":")
+        if not src or not dst:
+            return m.group(0)
+        # 命名卷（如 mydata:/data）不处理：源不以 / . ~ $ 开头
+        if not src[0] in "/.~$":
+            return m.group(0)
+        # $(pwd)/xxx → ./xxx
+        for tok in _PWD_TOKENS:
+            if src.startswith(tok):
+                src = "./" + src[len(tok):].lstrip("/")
+                break
+        # 只有相对路径需要换算成宿主机绝对路径
+        if not (src.startswith("./") or src.startswith("../") or src == "." or src == ".."):
+            return f"{indent}{src}{sep}{dst}"
+        host = os.path.normpath(os.path.join(host_project_dir, src))
         if host_dirs is not None:
             # 容器内对应路径（挂载目录内创建目录/改权限用）
-            container_host = os.path.normpath(os.path.join(project_dir, first))
-            host_dirs.append(container_host)
-        return f"{indent}{host}{rest}"
+            host_dirs.append(os.path.normpath(os.path.join(project_dir, src)))
+        return f"{indent}{host}{sep}{dst}"
 
     return pattern.sub(repl, yaml_text)
 
