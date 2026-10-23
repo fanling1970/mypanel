@@ -708,7 +708,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <el-table-column v-if="!isMobile" width="70">
               <template #header><span class="sortable-header" @click="toggleSort('cpu')">CPU <span class="sort-arrow" :class="{active: sortKey==='cpu'}">{{ sortKey==='cpu' ? (sortOrder==='asc' ? '▲' : '▼') : '⇅' }}</span></span></template>
               <template #default="{ row }">
-                <span v-if="row.stats" style="font-size: 12px; font-weight: 500;" :style="{color: row.stats.cpu_percent > 80 ? '#F56C6C' : row.stats.cpu_percent > 50 ? '#E6A23C' : 'var(--text-primary)'}">{{ row.stats.cpu_percent.toFixed(1) }}%</span>
+                <span v-if="row.stats" style="font-size: 12px; font-weight: 500;" :title="'30 秒平均 ' + cpuAvg(row.stats).toFixed(1) + '%  ·  瞬时 ' + (row.stats.cpu_percent || 0).toFixed(1) + '%'" :style="{color: cpuAvg(row.stats) > 80 ? '#F56C6C' : cpuAvg(row.stats) > 50 ? '#E6A23C' : 'var(--text-primary)'}">{{ cpuAvg(row.stats).toFixed(1) }}%</span>
                 <span v-else style="color: var(--text-dim); font-size: 12px;">-</span>
               </template>
             </el-table-column>
@@ -1574,7 +1574,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <div v-if="composeDetailStats" class="detail-card" style="margin-bottom: 16px;">
         <h4>资源统计</h4>
         <div class="detail-grid">
-          <div class="detail-item"><span class="dl">CPU</span><span class="dv">{{ composeDetailStats.cpu_percent }}%</span></div>
+          <div class="detail-item"><span class="dl">CPU</span><span class="dv">{{ cpuAvg(composeDetailStats).toFixed(1) }}%</span></div>
           <div class="detail-item"><span class="dl">内存</span><span class="dv">{{ formatBytes(composeDetailStats.memory_usage) }} / {{ formatBytes(composeDetailStats.memory_limit) }} ({{ composeDetailStats.memory_percent }}%)</span></div>
           <div class="detail-item"><span class="dl">网络I/O</span><span class="dv">RX: {{ formatBytes(composeDetailStats.network_rx) }} / TX: {{ formatBytes(composeDetailStats.network_tx) }}</span></div>
           <div class="detail-item"><span class="dl">磁盘I/O</span><span class="dv">读: {{ formatBytes(composeDetailStats.block_read) }} / 写: {{ formatBytes(composeDetailStats.block_write) }}</span></div>
@@ -1661,7 +1661,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <div class="detail-card">
           <h4>CPU 使用率</h4>
           <div class="chart-box"><canvas ref="cpuChart"></canvas></div>
-          <div style="text-align: center; font-size: 20px; font-weight: 700; margin-top: 6px;">{{ detailLiveStats.cpu_percent.toFixed(1) }}%</div>
+          <div style="text-align: center; font-size: 20px; font-weight: 700; margin-top: 6px;">{{ cpuAvg(detailLiveStats).toFixed(1) }}%</div>
+          <div style="text-align: center; font-size: 12px; color: var(--text-secondary);">30 秒平均 · 瞬时 {{ (detailLiveStats.cpu_percent || 0).toFixed(1) }}%</div>
         </div>
         <div class="detail-card">
           <h4>内存使用率</h4>
@@ -2208,7 +2209,7 @@ const app = createApp({
           case 'image': va = a.image || ''; vb = b.image || ''; break;
           case 'status': va = a.status; vb = b.status; break;
           case 'health': va = a.health || ''; vb = b.health || ''; break;
-          case 'cpu': va = a.stats?.cpu_percent ?? -1; vb = b.stats?.cpu_percent ?? -1; break;
+          case 'cpu': va = a.stats ? cpuAvg(a.stats) : -1; vb = b.stats ? cpuAvg(b.stats) : -1; break;
           case 'mem': va = a.stats?.memory_usage ?? -1; vb = b.stats?.memory_usage ?? -1; break;
           case 'net': va = (a.stats?.network_rx || 0) + (a.stats?.network_tx || 0); vb = (b.stats?.network_rx || 0) + (b.stats?.network_tx || 0); break;
           case 'disk': va = (a.stats?.block_read || 0) + (a.stats?.block_write || 0); vb = (b.stats?.block_read || 0) + (b.stats?.block_write || 0); break;
@@ -2859,17 +2860,25 @@ const app = createApp({
     // ============ 容器详情弹窗 ============
     const detailDialogVisible = ref(false);
     const detailData = ref(null);
-    const detailLiveStats = reactive({ cpu_percent: 0, memory_usage: 0, memory_limit: 0, memory_percent: 0, network_rx: 0, network_tx: 0 });
+    const detailLiveStats = reactive({ cpu_percent: 0, cpu_percent_avg: 0, memory_usage: 0, memory_limit: 0, memory_percent: 0, network_rx: 0, network_tx: 0 });
     const detailDockerLogs = ref('');
     let detailPollTimer = null;
     let cpuChartInst = null, memChartInst = null, netChartInst = null;
-    const cpuHistory = ref([]), memHistory = ref([]), netRxHistory = ref([]), netTxHistory = ref([]);
+    const cpuHistory = ref([]), cpuAvgHistory = ref([]), memHistory = ref([]), netRxHistory = ref([]), netTxHistory = ref([]);
+
+    // CPU 展示口径：后端同时给瞬时值(cpu_percent)与 30 秒滚动平均(cpu_percent_avg)，
+    // 界面统一显示平均值，避免单帧抖动导致数字乱跳；没有平均值时回退瞬时值。
+    function cpuAvg(stats) {
+      if (!stats) return 0;
+      const v = stats.cpu_percent_avg;
+      return (typeof v === 'number' && isFinite(v)) ? v : (stats.cpu_percent || 0);
+    }
 
     async function openContainerDetail(row) {
       detailDialogVisible.value = true;
       detailDockerLogs.value = '';
-      cpuHistory.value = []; memHistory.value = []; netRxHistory.value = []; netTxHistory.value = [];
-      Object.assign(detailLiveStats, { cpu_percent: 0, memory_usage: 0, memory_limit: 0, memory_percent: 0, network_rx: 0, network_tx: 0 });
+      cpuHistory.value = []; cpuAvgHistory.value = []; memHistory.value = []; netRxHistory.value = []; netTxHistory.value = [];
+      Object.assign(detailLiveStats, { cpu_percent: 0, cpu_percent_avg: 0, memory_usage: 0, memory_limit: 0, memory_percent: 0, network_rx: 0, network_tx: 0 });
       try {
         const res = await apiFetch(`/api/containers/${row.id}/detail`);
         const data = await res.json();
@@ -2890,6 +2899,7 @@ const app = createApp({
           const s = data.data;
           Object.assign(detailLiveStats, s);
           cpuHistory.value.push(s.cpu_percent); if (cpuHistory.value.length > 30) cpuHistory.value.shift();
+          cpuAvgHistory.value.push(cpuAvg(s)); if (cpuAvgHistory.value.length > 30) cpuAvgHistory.value.shift();
           memHistory.value.push(s.memory_percent); if (memHistory.value.length > 30) memHistory.value.shift();
           netRxHistory.value.push(s.network_rx); netTxHistory.value.push(s.network_tx);
           if (netRxHistory.value.length > 30) netRxHistory.value.shift();
@@ -4086,7 +4096,7 @@ const app = createApp({
       scheduleLogs, logsLoading, logTotal, logPage, logPageSize, loadScheduleLogs, clearLogs,
       containerLogDialogVisible, containerLogDialogTitle, containerLogData, containerLogLoading,
       containerLogFilter, viewContainerLogs, clearLogFilter,
-      formatTime, formatRelativeTime, formatUptime, formatBytes, formatSpeed, refreshAll,
+      formatTime, formatRelativeTime, formatUptime, formatBytes, formatSpeed, refreshAll, cpuAvg,
       openScheduleManager, addScheduleFromManager,
       containerSchedulesDialogVisible, containerSchedulesTitle, currentContainerSchedules, nextScheduleMap,
       detailDialogVisible, detailData, detailLiveStats, detailDockerLogs,

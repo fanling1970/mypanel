@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
@@ -267,6 +268,53 @@ def _stats_one_shot(c):
 _prev_cpu_sample: dict = {}          # full_id -> (total_usage, system_cpu_usage)
 _prev_cpu_lock = threading.Lock()
 
+# ---------- CPU 滚动平均 ----------
+# 单帧差分的瞬时值抖动很大：一轮采集只覆盖 3 秒（采集间隔），
+# 这 3 秒里如果恰好碰上打开面板触发的一堆 API 处理，读数就会被抬到 10%+，
+# 而 docker stats 的 1~2 秒窗口读数只有 0.5% 左右。
+# 对外显示改为最近 CPU_AVG_WINDOW 秒的均值，数值稳定且与 docker stats 同量级。
+# 原始瞬时值仍保留在 cpu_percent 字段，供详情页折线图使用。
+CPU_AVG_WINDOW = 30.0                # 平均窗口（秒）
+_cpu_hist: dict = {}                 # full_id -> deque[(ts, cpu_percent)]
+_cpu_hist_maxlen = 240               # 30s / 3s ≈ 10 帧，留足余量
+_cpu_hist_lock = threading.Lock()
+
+
+def _record_cpu_sample(cid: str, pct: float) -> float:
+    """记一次 CPU 瞬时值，返回窗口内平均值。"""
+    now = time.monotonic()
+    with _cpu_hist_lock:
+        hist = _cpu_hist.get(cid)
+        if hist is None:
+            hist = deque(maxlen=_cpu_hist_maxlen)
+            _cpu_hist[cid] = hist
+        hist.append((now, float(pct)))
+        while len(hist) > 1 and now - hist[0][0] > CPU_AVG_WINDOW:
+            hist.popleft()
+        total = 0.0
+        for _ts, _v in hist:
+            total += _v
+        return round(total / len(hist), 2)
+
+
+def cpu_avg_of(cid: str):
+    """取容器在窗口内的 CPU 平均值；无历史返回 None。"""
+    with _cpu_hist_lock:
+        hist = _cpu_hist.get(cid)
+        if not hist:
+            return None
+        now = time.monotonic()
+        vals = [v for ts, v in hist if now - ts <= CPU_AVG_WINDOW]
+        if not vals:
+            return None
+        return round(sum(vals) / len(vals), 2)
+
+
+def reset_cpu_history():
+    """清空 CPU 历史（容器增删、配置变更时调用）。"""
+    with _cpu_hist_lock:
+        _cpu_hist.clear()
+
 
 def collect_runtime_stats(containers=None) -> tuple:
     """一轮遍历同时产出：容器实时指标 + Compose 项目内存。
@@ -286,6 +334,8 @@ def collect_runtime_stats(containers=None) -> tuple:
     with _prev_cpu_lock:
         if not running:
             _prev_cpu_sample.clear()
+            with _cpu_hist_lock:
+                _cpu_hist.clear()
             return stats_map, compose_mem
 
         def _one(c):
@@ -345,6 +395,9 @@ def collect_runtime_stats(containers=None) -> tuple:
                 if d_sys > 0 and d_total >= 0:
                     cpu_percent = round(d_total / d_sys * cpu_count * 100, 2)
 
+            # 滚动平均：对外展示用，避免 3 秒窗口的瞬时尖峰
+            cpu_avg = _record_cpu_sample(cid, cpu_percent)
+
             network_rx = 0
             network_tx = 0
             for _name, nd in (raw.get("networks") or {}).items():
@@ -361,6 +414,7 @@ def collect_runtime_stats(containers=None) -> tuple:
 
             stats_map[c.short_id] = {
                 "cpu_percent": cpu_percent,
+                "cpu_percent_avg": cpu_avg,
                 "memory_usage": usage,
                 "memory_limit": limit,
                 "memory_percent": round(usage / limit * 100, 2) if limit > 0 else 0,
@@ -374,6 +428,9 @@ def collect_runtime_stats(containers=None) -> tuple:
         # 清掉已消失容器的历史样本，防止字典无限增长
         for gone in [k for k in _prev_cpu_sample if k not in alive]:
             _prev_cpu_sample.pop(gone, None)
+        with _cpu_hist_lock:
+            for gone in [k for k in _cpu_hist if k not in alive]:
+                _cpu_hist.pop(gone, None)
 
     return stats_map, compose_mem
 
@@ -945,6 +1002,11 @@ def get_container_stats(container_id: str, container=None) -> Optional[dict]:
     cpu_count = len(stats["cpu_stats"]["cpu_usage"].get("percpu_usage", [])) or stats["cpu_stats"].get("online_cpus", 1)
     cpu_percent = round((cpu_delta / system_delta) * cpu_count * 100, 2) if system_delta > 0 else 0
 
+    # 平滑值：优先用采集器累积的滚动平均，没有历史就用本次瞬时值兜底
+    cpu_avg = cpu_avg_of(c.id)
+    if cpu_avg is None:
+        cpu_avg = cpu_percent
+
     # 内存
     memory_usage = stats["memory_stats"].get("usage", 0)
     memory_limit = stats["memory_stats"].get("limit", 0)
@@ -974,6 +1036,7 @@ def get_container_stats(container_id: str, container=None) -> Optional[dict]:
 
     return {
         "cpu_percent": cpu_percent,
+        "cpu_percent_avg": cpu_avg,
         "memory_usage": memory_usage,
         "memory_limit": memory_limit,
         "memory_percent": memory_percent,
@@ -1760,6 +1823,7 @@ def get_compose_project_stats(project_name: str) -> Optional[dict]:
         }
 
     total_cpu = 0
+    total_cpu_avg = 0.0
     total_mem_usage = 0
     total_mem_limit = 0
     total_net_rx = 0
@@ -1772,14 +1836,14 @@ def get_compose_project_stats(project_name: str) -> Optional[dict]:
     # 项目里有 N 个容器就要付 N 倍时间；并发后总耗时≈单个容器。
     def _sample(c):
         try:
-            return c.stats(stream=False)
+            return c, c.stats(stream=False)
         except Exception:
-            return None
+            return c, None
 
     with ThreadPoolExecutor(max_workers=min(8, len(running_containers))) as _pool:
         _all_stats = list(_pool.map(_sample, running_containers))
 
-    for stats in _all_stats:
+    for _member, stats in _all_stats:
         if not stats:
             continue
 
@@ -1789,6 +1853,9 @@ def get_compose_project_stats(project_name: str) -> Optional[dict]:
         cpu_count = len(stats["cpu_stats"]["cpu_usage"].get("percpu_usage", [])) or stats["cpu_stats"].get("online_cpus", 1)
         cpu_percent = round((cpu_delta / system_delta) * cpu_count * 100, 2) if system_delta > 0 else 0
         total_cpu += cpu_percent
+        # 平滑值：优先取该容器在采集器里的滚动平均
+        _avg = cpu_avg_of(_member.id)
+        total_cpu_avg += _avg if _avg is not None else cpu_percent
 
         # 内存
         total_mem_usage += stats["memory_stats"].get("usage", 0)
@@ -1813,6 +1880,7 @@ def get_compose_project_stats(project_name: str) -> Optional[dict]:
 
     return {
         "cpu_percent": round(total_cpu, 2),
+        "cpu_percent_avg": round(total_cpu_avg, 2),
         "memory_usage": total_mem_usage,
         "memory_limit": total_mem_limit,
         "memory_percent": memory_percent,
