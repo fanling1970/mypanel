@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.009"
+APP_VERSION = "2.7.3.010"
 
 import asyncio
 import json
@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ============ 只读接口 TTL 缓存参数 ============
 # 列表类（容器/镜像/Compose）：Docker inspect 全量较慢，30 秒内复用结果
-CACHE_TTL_LIST = 30.0
+CACHE_TTL_LIST = 300.0   # 需覆盖空闲采集间隔（120s），避免端点请求落到过期缓存上重算
 # 实时指标类（CPU/内存）：变化快，用较短 TTL 兼顾新鲜度与开销
 CACHE_TTL_STATS = 15.0
 # 重新计算类长任务（Compose 内存采样需两次 cgroup 采样）：稍长一些
@@ -76,8 +76,13 @@ def _has_recent_demand() -> bool:
 
 
 def _runtime_interval() -> float:
-    """采集器调用：有人看 3 秒一轮，无人看 30 秒一轮。"""
+    """采集器调用：有人看 3 秒一轮，无人看 60 秒一轮。"""
     return COLLECT_INTERVAL_ACTIVE if _has_recent_demand() else COLLECT_INTERVAL_IDLE
+
+
+def _list_interval() -> float:
+    """镜像 / Compose 项目列表：有人看 15 秒，无人看 120 秒。"""
+    return COLLECT_INTERVAL_LIST if _has_recent_demand() else COLLECT_INTERVAL_LIST_IDLE
 
 BUILD_COMMIT = (os.environ.get("GIT_COMMIT") or os.environ.get("BUILD_COMMIT") or "unknown")[:12]
 
@@ -95,22 +100,32 @@ _last_ms = {}
 RUNTIME_BUNDLE_KEY = "containers_bundle"
 
 
-def _collect_runtime_bundle() -> dict:
-    """一次遍历产出：容器列表、容器实时指标、Compose 项目内存。"""
+def _collect_runtime_bundle(with_stats: bool = True) -> dict:
+    """一次遍历产出：容器列表、容器实时指标、Compose 项目内存。
+
+    with_stats=False 时只刷新容器列表，跳过逐个 cgroup 采样——
+    没人看面板时（空闲节奏），CPU/内存数字本来也没人读，
+    这部分是空闲状态下的主要开销，直接省掉。
+    """
     client = docker_client.get_client()
     containers = client.containers.list(all=True)
 
-    stats_map, compose_mem = docker_client.collect_runtime_stats(containers)
+    if with_stats:
+        stats_map, compose_mem = docker_client.collect_runtime_stats(containers)
+    else:
+        stats_map, compose_mem = {}, {}
     raw = {
         "success": True,
         "data": docker_client.list_containers(True, containers=containers),
     }
 
     cache.set("containers_raw", raw, CACHE_TTL_COLLECTED)
-    cache.set("containers_stats", {"success": True, "data": stats_map},
-              CACHE_TTL_COLLECTED)
-    cache.set("compose_stats", {"success": True, "data": compose_mem},
-              CACHE_TTL_COLLECTED)
+    # 只在真的采了指标时写入，避免把上一轮的 CPU/内存数据冲成空表
+    if with_stats:
+        cache.set("containers_stats", {"success": True, "data": stats_map},
+                  CACHE_TTL_COLLECTED)
+        cache.set("compose_stats", {"success": True, "data": compose_mem},
+                  CACHE_TTL_COLLECTED)
     return raw
 
 
@@ -362,9 +377,10 @@ async def _log_check_results(results: dict, source: str = "手动检查"):
 # 现算一次就要付一次；采集器把它挪出请求路径，所有接口直接读快照。
 # 采集节奏：单帧采样后单轮只需几十~几百毫秒，但没人看时没必要跑，
 # 交给 _runtime_interval() 动态决定。
-COLLECT_INTERVAL_ACTIVE = 3.0
-COLLECT_INTERVAL_IDLE = 30.0
-COLLECT_INTERVAL_LIST = 15.0   # 镜像 / Compose 项目列表，较便宜
+COLLECT_INTERVAL_ACTIVE = 3.0     # 有人在看：3 秒一轮，够及时
+COLLECT_INTERVAL_IDLE = 60.0      # 无人看：60 秒一轮，只为保持数据不过期
+COLLECT_INTERVAL_LIST = 15.0      # 有人看时的镜像 / Compose 项目列表
+COLLECT_INTERVAL_LIST_IDLE = 120.0  # 无人看时的同两项，几乎不需要刷新
 
 
 def _collect_into_cache(key, fn):
@@ -377,14 +393,14 @@ def _collect_into_cache(key, fn):
 
 
 def _collect_runtime_job() -> dict:
-    """采集器任务：一轮遍历刷新容器列表 + 指标 + Compose 内存。"""
+    """采集器任务：有人看时连指标一起采，无人看只刷容器列表。"""
     t0 = time.monotonic()
-    payload = _collect_runtime_bundle()
+    payload = _collect_runtime_bundle(with_stats=_has_recent_demand())
     _last_ms["containers_bundle"] = round((time.monotonic() - t0) * 1000.0, 1)
     return payload
 
 
-collector = SnapshotCollector(tick=1.0, max_workers=3)
+collector = SnapshotCollector(tick=1.0, max_workers=3)  # 1s 唤醒一次，只做时间比较，开销可忽略
 
 # 运行时指标与容器列表：合成一个采集项，动态间隔（有人看 3s / 无人 30s）
 collector.register(
@@ -395,7 +411,7 @@ collector.register(
 for _k, _fn in _SWR_PRODUCERS.items():
     collector.register(
         _k, _collect_into_cache(_k, _fn),
-        interval=COLLECT_INTERVAL_LIST, initial_delay=0.05,
+        interval=_list_interval, initial_delay=0.05,
     )
 
 
@@ -1386,10 +1402,11 @@ async def list_images(force: bool = Query(default=False)):
     """
     if force:
         cache.invalidate("images")
+    _mark_demand()
     cached, age = cache.get_stale("images", SWR_MAX_AGE)
     if cached is not None and not force:
-        if age >= SWR_REFRESH_AFTER:
-            _swr_refresh("images")
+        # 不再在请求路径里另起线程重算：采集器已在按节奏刷新，
+        # 两套机制并行只会把同一份扫描做成两份。
         return cached
     try:
         images = await asyncio.to_thread(docker_client.list_images)
@@ -1653,10 +1670,9 @@ async def list_compose_projects(force: bool = Query(default=False)):
     """
     if force:
         cache.invalidate("compose_projects")
+    _mark_demand()
     cached, age = cache.get_stale("compose_projects", SWR_MAX_AGE)
     if cached is not None and not force:
-        if age >= SWR_REFRESH_AFTER:
-            _swr_refresh("compose_projects")
         return await _merge_compose_descriptions(cached)
     try:
         projects = await asyncio.to_thread(docker_client.list_compose_projects)
