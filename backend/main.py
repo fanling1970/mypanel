@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.007"
+APP_VERSION = "2.7.3.008"
 
 import asyncio
 import json
@@ -41,6 +41,8 @@ CACHE_TTL_LIST = 30.0
 CACHE_TTL_STATS = 15.0
 # 重新计算类长任务（Compose 内存采样需两次 cgroup 采样）：稍长一些
 CACHE_TTL_COMPOSE_STATS = 20.0
+# 采集器写入的运行时快照：条目由采集器按间隔刷新，TTL 仅作兜底
+CACHE_TTL_COLLECTED = 120.0
 
 # ============ stale-while-revalidate ============
 # 数据超过 SWR_REFRESH_AFTER 秒就触发后台刷新，但请求立刻返回上一次快照。
@@ -50,6 +52,33 @@ SWR_REFRESH_AFTER = 8.0
 # 超过该年龄则不再兜底返回旧数据，避免展示很久以前的状态
 SWR_MAX_AGE = 600.0
 
+# ============ 空闲门控 ============
+# 面板没人看时没必要持续跑 Docker 采样。
+# 最近 DEMAND_WINDOW 秒内有 API 请求 → 按 ACTIVE 间隔采；
+# 超过窗口 → 退到 IDLE 间隔，有新请求立刻恢复。
+DEMAND_WINDOW = 90.0
+_last_demand_at = 0.0
+_demand_lock = threading.Lock()
+
+
+def _mark_demand() -> None:
+    """记录一次「有人在用面板」，用于决定采集频率。"""
+    global _last_demand_at
+    with _demand_lock:
+        _last_demand_at = time.monotonic()
+
+
+def _has_recent_demand() -> bool:
+    with _demand_lock:
+        if _last_demand_at <= 0:
+            return False
+        return (time.monotonic() - _last_demand_at) < DEMAND_WINDOW
+
+
+def _runtime_interval() -> float:
+    """采集器调用：有人看 3 秒一轮，无人看 30 秒一轮。"""
+    return COLLECT_INTERVAL_ACTIVE if _has_recent_demand() else COLLECT_INTERVAL_IDLE
+
 BUILD_COMMIT = (os.environ.get("GIT_COMMIT") or os.environ.get("BUILD_COMMIT") or "unknown")[:12]
 
 _swr_lock = threading.Lock()
@@ -57,31 +86,72 @@ _swr_inflight = set()
 _last_ms = {}
 
 
-def _build_containers_stats() -> dict:
-    """同步计算所有运行中容器的 stats（在线程池里并发，约等于一次采样耗时）。"""
-    containers = docker_client.list_containers(False)
-    running = [c for c in containers if c.get("status") == "running"]
-    if not running:
-        return {"success": True, "data": {}}
-
-    full_ids = [c["full_id"] for c in running]
-    short_of = {c["full_id"]: c["id"] for c in running}
-
-    def one(cid):
-        try:
-            return cid, docker_client.get_container_stats(cid)
-        except Exception:
-            return cid, None
-
-    out = {}
-    with ThreadPoolExecutor(max_workers=min(32, len(full_ids))) as pool:
-        for cid, st in pool.map(one, full_ids):
-            out[short_of.get(cid, cid)] = st
-    return {"success": True, "data": out}
+# ---------- 运行时指标：一轮遍历同时产出 stats + Compose 内存 ----------
+# 旧实现的问题（CPU 居高不下的根源）：
+#   1. containers_stats 走 docker stats(stream=False) 两帧采样，单容器阻塞 1~2 秒；
+#   2. compose_stats 又把同一批容器重新 list + 再采一遍 stats；
+#   3. 每条链各自 list_containers，一轮下来约 49 次 Docker API 往返。
+# 现在合并成一次 list + 一次单帧采样，同时算出 CPU 差值与 Compose 内存。
+RUNTIME_BUNDLE_KEY = "containers_bundle"
 
 
-def _build_compose_stats() -> dict:
-    return {"success": True, "data": docker_client.get_all_compose_memory()}
+def _collect_runtime_bundle() -> dict:
+    """一次遍历产出：容器列表、容器实时指标、Compose 项目内存。"""
+    client = docker_client.get_client()
+    containers = client.containers.list(all=True)
+
+    stats_map, compose_mem = docker_client.collect_runtime_stats(containers)
+    raw = {
+        "success": True,
+        "data": docker_client.list_containers(True, containers=containers),
+    }
+
+    cache.set("containers_raw", raw, CACHE_TTL_COLLECTED)
+    cache.set("containers_stats", {"success": True, "data": stats_map},
+              CACHE_TTL_COLLECTED)
+    cache.set("compose_stats", {"success": True, "data": compose_mem},
+              CACHE_TTL_COLLECTED)
+    return raw
+
+
+def _refresh_runtime_bundle() -> None:
+    """按需触发一次重算（走采集器单飞，不额外开线程）。"""
+    _mark_demand()
+    collector.invalidate(RUNTIME_BUNDLE_KEY)
+
+
+def _invalidate_runtime() -> None:
+    """容器状态变更后调用：清缓存 + 让采集器立刻重采一轮。
+
+    只清 cache 是不够的——数据由采集器产出，若不清采集器的 next_due，
+    空闲节奏下最多要等 30 秒才会刷新，用户会看到「操作后数据没变」。
+    """
+    _invalidate_runtime()
+    _mark_demand()
+    try:
+        collector.invalidate(RUNTIME_BUNDLE_KEY)
+    except Exception:
+        pass
+
+
+def _unpack_bundle_stats(_snapshot=None):
+    """从缓存里分别取出「容器指标」与「Compose 内存」两份数据。
+
+    这两份数据由同一次 Docker 遍历产出（collect_runtime_stats），
+    这里只是把缓存内容转交给端点，不做任何计算。
+    返回 (stats_map, memory_map)，缺失的一方为 None。
+    """
+    try:
+        stats_payload = cache.get("containers_stats") or {}
+    except Exception:
+        stats_payload = {}
+    try:
+        mem_payload = cache.get("compose_stats") or {}
+    except Exception:
+        mem_payload = {}
+    stats_map = stats_payload.get("data") if isinstance(stats_payload, dict) else None
+    memory_map = mem_payload.get("data") if isinstance(mem_payload, dict) else None
+    return stats_map, memory_map
 
 
 def _build_images() -> dict:
@@ -92,17 +162,16 @@ def _build_compose_projects() -> dict:
     return {"success": True, "data": docker_client.list_compose_projects()}
 
 
+# 只保留「便宜且独立」的项交给 SWR；容器指标/列表已由 RUNTIME_BUNDLE_KEY 承担
 _SWR_PRODUCERS = {
-    "containers_stats": _build_containers_stats,
-    "compose_stats": _build_compose_stats,
     "images": _build_images,
     "compose_projects": _build_compose_projects,
 }
 
+
 # 各 key 对应的缓存 TTL（决定"多旧算过期"，过期仍会先返回旧值再后台刷新）
+# 只有轻量 SWR 生产者需要 TTL；容器指标与 Compose 内存由采集器直接写缓存
 _SWR_TTLS = {
-    "containers_stats": CACHE_TTL_STATS,
-    "compose_stats": CACHE_TTL_COMPOSE_STATS,
     "images": CACHE_TTL_LIST,
     "compose_projects": CACHE_TTL_LIST,
 }
@@ -291,8 +360,11 @@ async def _log_check_results(results: dict, source: str = "手动检查"):
 # 思路：把「每次请求现算」换成「后台持续算、请求只读内存」。
 # docker stats(stream=False) 必须等两帧采样（1~2 秒），
 # 现算一次就要付一次；采集器把它挪出请求路径，所有接口直接读快照。
-COLLECT_INTERVAL_STATS = 2.0   # 需要采样两帧的项，节奏稍缓
-COLLECT_INTERVAL_LIST = 5.0    # 列表类很便宜，5 秒足够新鲜
+# 采集节奏：单帧采样后单轮只需几十~几百毫秒，但没人看时没必要跑，
+# 交给 _runtime_interval() 动态决定。
+COLLECT_INTERVAL_ACTIVE = 3.0
+COLLECT_INTERVAL_IDLE = 30.0
+COLLECT_INTERVAL_LIST = 15.0   # 镜像 / Compose 项目列表，较便宜
 
 
 def _collect_into_cache(key, fn):
@@ -304,23 +376,27 @@ def _collect_into_cache(key, fn):
     return _job
 
 
-def _collect_containers_raw():
-    """容器原始列表（不含 settings，settings 由端点在请求时叠加）。"""
-    payload = {"success": True, "data": docker_client.list_containers(True)}
-    cache.set("containers_raw", payload, CACHE_TTL_LIST)
+def _collect_runtime_job() -> dict:
+    """采集器任务：一轮遍历刷新容器列表 + 指标 + Compose 内存。"""
+    t0 = time.monotonic()
+    payload = _collect_runtime_bundle()
+    _last_ms["containers_bundle"] = round((time.monotonic() - t0) * 1000.0, 1)
     return payload
 
 
-collector = SnapshotCollector(tick=0.5, max_workers=4)
+collector = SnapshotCollector(tick=1.0, max_workers=3)
+
+# 运行时指标与容器列表：合成一个采集项，动态间隔（有人看 3s / 无人 30s）
+collector.register(
+    RUNTIME_BUNDLE_KEY, _collect_runtime_job,
+    interval=_runtime_interval, initial_delay=0.05,
+)
 
 for _k, _fn in _SWR_PRODUCERS.items():
     collector.register(
         _k, _collect_into_cache(_k, _fn),
-        interval=COLLECT_INTERVAL_STATS if _k.endswith("_stats") else COLLECT_INTERVAL_LIST,
-        initial_delay=0.05,
+        interval=COLLECT_INTERVAL_LIST, initial_delay=0.05,
     )
-collector.register("containers_raw", _collect_containers_raw,
-                   interval=COLLECT_INTERVAL_LIST, initial_delay=0.05)
 
 
 # ============ 应用生命周期 ============
@@ -696,12 +772,19 @@ async def list_containers(force: bool = Query(default=False)):
     采集器在后台每 5 秒重建一次快照；force=true 时同步重算（刷新按钮用）。
     settings 每次请求叠加，sqlite 读很便宜，保证开关状态即时生效。
     """
+    _mark_demand()
     if force:
-        cache.invalidate("containers_raw")
+        # 刷新按钮：让采集器立刻重采一轮，这里不阻塞等待
+        _refresh_runtime_bundle()
     raw = cache.get("containers_raw")
+    if raw is None:
+        snapshot, _age = collector.get(RUNTIME_BUNDLE_KEY)
+        if isinstance(snapshot, dict) and snapshot.get("data") is not None:
+            raw = snapshot
     if raw is not None:
         containers = [dict(c) for c in raw.get("data") or []]
     else:
+        # 首次冷启动：采集器还没产出快照，退回同步读取
         containers = await asyncio.to_thread(docker_client.list_containers, True)
     settings = await db.get_container_update_settings()
     descriptions = await db.get_descriptions("container")
@@ -720,49 +803,33 @@ async def get_all_containers_stats():
 
     直接返回上一次快照，超过 8 秒则在后台重算——用户侧除首次外都是瞬时响应。
     """
+    _mark_demand()
     cached, age = cache.get_stale("containers_stats", SWR_MAX_AGE)
     if cached is not None:
-        if age >= SWR_REFRESH_AFTER:
-            _swr_refresh("containers_stats")
         return cached
-    try:
-        containers = await asyncio.to_thread(docker_client.list_containers, False)
-        running = [c for c in containers if c["status"] == "running"]
-        # 并行获取所有运行中容器的stats
-        tasks = []
-        for c in running:
-            tasks.append(asyncio.to_thread(docker_client.get_container_stats, c["id"]))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        stats_map = {}
-        for c, result in zip(running, results):
-            if isinstance(result, Exception) or result is None:
-                stats_map[c["id"]] = None
-            else:
-                stats_map[c["id"]] = result
-        payload = {"success": True, "data": stats_map}
-        cache.set("containers_stats", payload, CACHE_TTL_STATS)
-        return payload
-    except Exception as e:
-        logger.error(f"批量获取容器统计失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    # 采集器快照兜底（通常是同一个数据源）
+    snapshot, _age = collector.get(RUNTIME_BUNDLE_KEY)
+    stats_map, _mem = _unpack_bundle_stats(snapshot)
+    if stats_map is not None:
+        return {"success": True, "data": stats_map}
+    # 真的还没有数据：触发一轮采集，本次先返回空表，避免请求路径里做重活
+    _refresh_runtime_bundle()
+    return {"success": True, "data": {}}
 
 
 @app.get("/api/compose/stats")
 async def get_all_compose_stats():
     """批量获取所有 Compose 项目的内存占用（stale-while-revalidate）"""
+    _mark_demand()
     cached, age = cache.get_stale("compose_stats", SWR_MAX_AGE)
     if cached is not None:
-        if age >= SWR_REFRESH_AFTER:
-            _swr_refresh("compose_stats")
         return cached
-    try:
-        memory_map = await asyncio.to_thread(docker_client.get_all_compose_memory)
-        payload = {"success": True, "data": memory_map}
-        cache.set("compose_stats", payload, CACHE_TTL_COMPOSE_STATS)
-        return payload
-    except Exception as e:
-        logger.error(f"批量获取 Compose 内存失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    snapshot, _age = collector.get(RUNTIME_BUNDLE_KEY)
+    _stats, memory_map = _unpack_bundle_stats(snapshot)
+    if memory_map is not None:
+        return {"success": True, "data": memory_map}
+    _refresh_runtime_bundle()
+    return {"success": True, "data": {}}
 
 
 @app.get("/api/containers/{container_id}/info")
@@ -809,7 +876,7 @@ async def start_container(container_id: str):
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
     # 状态已变，让容器快照立即失效，下一次加载即为最新
-    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
+    _invalidate_runtime()
     return result
 
 
@@ -820,7 +887,7 @@ async def stop_container(container_id: str):
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
     # 状态已变，让容器快照立即失效，下一次加载即为最新
-    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
+    _invalidate_runtime()
     return result
 
 
@@ -831,7 +898,7 @@ async def restart_container(container_id: str):
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
     # 状态已变，让容器快照立即失效，下一次加载即为最新
-    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
+    _invalidate_runtime()
     return result
 
 
@@ -865,7 +932,7 @@ async def create_container(req: ContainerCreateRequest):
         except Exception as e:
             logger.warning(f"保存容器描述失败: {e}")
     # 状态已变，让容器快照立即失效，下一次加载即为最新
-    cache.invalidate("containers_raw", "containers_stats", "compose_stats")
+    _invalidate_runtime()
     return result
 
 

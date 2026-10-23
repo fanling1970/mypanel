@@ -28,3 +28,8 @@ services:
       - HOST_ROOT_HOST=${HOST_ROOT:-/}
       - HOST_ROOT_MOUNT=/host-root
     restart: unless-stopped
+    # 资源上限：本面板是常驻只读监控，正常应 CPU < 5%、内存 ~100MB。
+    # 加上限可在采集异常/死循环时保护路由器，避免占满整机 CPU。
+    # 若后续功能受限（如大目录文件遍历变慢），可适当放宽这两个值。
+    cpus: "1.0"
+    mem_limit: 256m

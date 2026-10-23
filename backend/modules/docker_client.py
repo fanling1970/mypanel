@@ -4,6 +4,7 @@ import docker
 import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -257,6 +258,126 @@ def _stats_one_shot(c):
         return c.stats(stream=False)
 
 
+# ---------- 一次性运行时指标采集 ----------
+# CPU 百分比的两种算法：
+#   A. docker stats(stream=False) 等两帧，单容器阻塞 1~2 秒；
+#   B. 每轮只取一帧（one_shot，几十毫秒），把本次与上次的 cgroup 累计值自己相减。
+# B 的代价是首次采样没有基准（显示 0），但换取每轮快 20~50 倍，
+# 这是本机 CPU 居高不下的主因，故采用 B。
+_prev_cpu_sample: dict = {}          # full_id -> (total_usage, system_cpu_usage)
+_prev_cpu_lock = threading.Lock()
+
+
+def collect_runtime_stats(containers=None) -> tuple:
+    """一轮遍历同时产出：容器实时指标 + Compose 项目内存。
+
+    相比旧实现省掉的开销：
+    1. 不再「list_containers 一次 + get_all_compose_memory 再 list 一次」；
+    2. 不再对每个容器额外 containers.get() 做一次 inspect 往返；
+    3. 不再对每个容器等两帧 stats（1~2 秒），改单帧 + 自行做差。
+    """
+    if containers is None:
+        containers = get_client().containers.list(all=True)
+
+    running = [c for c in containers if c.status == "running"]
+    stats_map: dict = {}
+    compose_mem: dict = {}
+
+    with _prev_cpu_lock:
+        if not running:
+            _prev_cpu_sample.clear()
+            return stats_map, compose_mem
+
+        def _one(c):
+            try:
+                return c, _stats_one_shot(c)
+            except Exception:
+                return c, None
+
+        workers = min(16, len(running))
+        if workers <= 1:
+            results = [_one(c) for c in running]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(_one, running))
+
+        alive = set()
+        for c, st in results:
+            cid = c.id
+            alive.add(cid)
+
+            raw = st
+            if not isinstance(raw, dict):
+                try:
+                    raw = next(iter(raw), {}) or {}
+                except Exception:
+                    raw = {}
+            if not raw:
+                stats_map[c.short_id] = None
+                continue
+
+            memory_stats = raw.get("memory_stats") or {}
+            usage = memory_stats.get("usage", 0) or 0
+            limit = memory_stats.get("limit", 0) or 0
+
+            # Compose 项目内存（label 缺失的容器不计入）
+            try:
+                labels = (c.attrs.get("Config") or {}).get("Labels") or {}
+                project = labels.get("com.docker.compose.project")
+            except Exception:
+                project = None
+            if project:
+                compose_mem[project] = compose_mem.get(project, 0) + usage
+
+            cpu_stats = raw.get("cpu_stats") or {}
+            cpu_usage = cpu_stats.get("cpu_usage") or {}
+            cur_total = cpu_usage.get("total_usage", 0) or 0
+            cur_sys = cpu_stats.get("system_cpu_usage", 0) or 0
+            cpu_count = len(cpu_usage.get("percpu_usage") or []) or cpu_stats.get("online_cpus", 1) or 1
+
+            prev = _prev_cpu_sample.get(cid)
+            _prev_cpu_sample[cid] = (cur_total, cur_sys)
+
+            cpu_percent = 0.0
+            if prev is not None:
+                d_total = cur_total - prev[0]
+                d_sys = cur_sys - prev[1]
+                if d_sys > 0 and d_total >= 0:
+                    cpu_percent = round(d_total / d_sys * cpu_count * 100, 2)
+
+            network_rx = 0
+            network_tx = 0
+            for _name, nd in (raw.get("networks") or {}).items():
+                network_rx += nd.get("rx_bytes", 0) or 0
+                network_tx += nd.get("tx_bytes", 0) or 0
+
+            block_read = 0
+            block_write = 0
+            for entry in (raw.get("blkio_stats") or {}).get("io_service_bytes_recursive") or []:
+                if entry.get("op") == "read":
+                    block_read += entry.get("value", 0) or 0
+                elif entry.get("op") == "write":
+                    block_write += entry.get("value", 0) or 0
+
+            stats_map[c.short_id] = {
+                "cpu_percent": cpu_percent,
+                "memory_usage": usage,
+                "memory_limit": limit,
+                "memory_percent": round(usage / limit * 100, 2) if limit > 0 else 0,
+                "network_rx": network_rx,
+                "network_tx": network_tx,
+                "block_read": block_read,
+                "block_write": block_write,
+                "pids": (raw.get("pids_stats") or {}).get("current", 0) or 0,
+            }
+
+        # 清掉已消失容器的历史样本，防止字典无限增长
+        for gone in [k for k in _prev_cpu_sample if k not in alive]:
+            _prev_cpu_sample.pop(gone, None)
+
+    return stats_map, compose_mem
+
+
 def _parse_container_ports(c) -> list[str]:
     """解析容器端口映射为 ['0.0.0.0:8080->80/tcp', ...]（仅 IPv4，过滤 IPv6 双栈重复项）"""
     ports = []
@@ -290,14 +411,17 @@ def _parse_container_ports(c) -> list[str]:
     return ports
 
 
-def list_containers(all: bool = True) -> list[dict]:
+def list_containers(all: bool = True, containers=None) -> list[dict]:
     """获取容器列表
 
     Args:
         all: 是否包含已停止的容器
+        containers: 可选，已调用方预先取到的容器对象列表；
+                    传入时复用，避免同一轮采集里重复请求 Docker。
     """
-    client = get_client()
-    containers = client.containers.list(all=all)
+    if containers is None:
+        client = get_client()
+        containers = client.containers.list(all=all)
 
     result = []
     for c in containers:

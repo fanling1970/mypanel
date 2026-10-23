@@ -98,8 +98,9 @@ class SnapshotCollector:
             out = {}
             for k, j in self._jobs.items():
                 item = self._data.get(k)
+                iv = j["interval"]
                 out[k] = {
-                    "interval": j["interval"],
+                    "interval": iv if isinstance(iv, (int, float)) else "dynamic",
                     "runs": j["runs"],
                     "errors": j["errors"],
                     "last_ms": j["last_ms"],
@@ -118,7 +119,13 @@ class SnapshotCollector:
                 if j["inflight"] or now < j["next_due"]:
                     continue
                 j["inflight"] = True
-                j["next_due"] = now + j["interval"]
+                iv = j["interval"]
+                if callable(iv):
+                    try:
+                        iv = float(iv())
+                    except Exception:
+                        iv = 5.0
+                j["next_due"] = now + float(iv)
                 due.append((k, j["fn"]))
         for k, fn in due:
             self._pool.submit(self._run_job, k, fn)
