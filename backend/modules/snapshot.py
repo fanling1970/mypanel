@@ -45,13 +45,19 @@ class SnapshotCollector:
 
     # ---------- 注册 / 读取 ----------
 
-    def register(self, key: str, fn, interval: float = 3.0,
+    def register(self, key: str, fn, interval=3.0,
                  initial_delay: float = 0.0) -> None:
-        """登记一个采集项。interval 为两次采集的最小间隔（秒）。"""
+        """登记一个采集项。
+
+        interval 为两次采集的最小间隔（秒），可以是数字，
+        也可以是无参可调用对象——后者每次触发前重新求值，
+        用于「有人访问就快一点、没人访问就慢一点」这类动态节奏。
+        """
         with self._lock:
             self._jobs[key] = {
                 "fn": fn,
-                "interval": float(interval),
+                # 数字则归一化为 float；函数原样保留，触发时再求值
+                "interval": interval if callable(interval) else float(interval),
                 "next_due": time.monotonic() + float(initial_delay),
                 "inflight": False,
                 "runs": 0,
