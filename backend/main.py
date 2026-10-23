@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.011"
+APP_VERSION = "2.7.3.012"
 
 import asyncio
 import json
@@ -141,7 +141,12 @@ def _invalidate_runtime() -> None:
     只清 cache 是不够的——数据由采集器产出，若不清采集器的 next_due，
     空闲节奏下最多要等 30 秒才会刷新，用户会看到「操作后数据没变」。
     """
-    _invalidate_runtime()
+    # 容器列表与指标、Compose 内存是同一次遍历产出的，必须一起清，
+    # 否则列表已更新而内存列还挂着已删除容器的旧值。
+    try:
+        cache.invalidate("containers_raw", "containers_stats", "compose_stats")
+    except Exception:
+        pass
     _mark_demand()
     try:
         collector.invalidate(RUNTIME_BUNDLE_KEY)
@@ -958,6 +963,8 @@ async def remove_container(container_id: str, force: int = Query(0, ge=0, le=1))
     result = await asyncio.to_thread(docker_client.remove_container, container_id, force=bool(force))
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
+    # 状态已变，让容器快照立即失效，下一次加载即为最新（否则列表里还会残留已删容器）
+    _invalidate_runtime()
     return result
 
 

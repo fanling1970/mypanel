@@ -1957,6 +1957,7 @@ const app = createApp({
           ElementPlus.ElMessage.success('登录成功');
           // 初始化应用数据
           await initAppData();
+          startContainerPoll();
         } else if (data.data && data.data['2fa_required']) {
           // 密码正确，需要验证码
           login2faRequired.value = true;
@@ -1971,6 +1972,7 @@ const app = createApp({
     }
 
     function doLogout() {
+      stopContainerPoll();
       isLoggedIn.value = false;
       authToken.value = '';
       currentUser.value = '';
@@ -2225,21 +2227,46 @@ const app = createApp({
     function onContainerPageSizeChange() { containerPage.value = 1; }
     watch(containerSearch, () => { containerPage.value = 1; });
     watch(containerStatusFilter, (val) => { containerPage.value = 1; if (!val) statFilter.value = ''; else if (val === 'running') statFilter.value = 'running'; else if (val === 'exited') statFilter.value = 'stopped'; });
+    // 按 id 合并容器列表：保留行对象引用与行内临时状态（_loading/_deleting），
+    // 只更新变化的字段。整表替换会让 Element 表格重建行、看起来在"跳"，
+    // 自动刷新这种高频调用尤其明显。
+    function mergeContainers(list) {
+      const incoming = new Map();
+      for (const c of list) incoming.set(c.id, c);
+      const next = [];
+      for (const old of containers.value) {
+        const fresh = incoming.get(old.id);
+        if (!fresh) continue;               // 已消失的容器直接丢弃
+        incoming.delete(old.id);
+        const merged = { ...fresh, _loading: old._loading, _deleting: old._deleting };
+        // 后端列表接口的 stats 恒为 null（指标走独立接口），
+        // 这里保留上一轮的值，避免每次轮询 CPU/内存列闪成 "-"
+        if (merged.stats == null && old.stats) merged.stats = old.stats;
+        Object.assign(old, merged);
+        next.push(old);
+      }
+      for (const fresh of incoming.values()) next.push({ ...fresh, _loading: false });
+      containers.value = next;
+    }
+
     async function loadContainers(opts) {
       const force = !!(opts && opts.force);
-      containersLoading.value = true;
+      const silent = !!(opts && opts.silent);   // 自动刷新用：不显示 loading、不弹错误提示
+      if (!silent) containersLoading.value = true;
       try {
         const res = await apiFetch('/api/containers' + (force ? '?force=1' : ''));
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          ElementPlus.ElMessage.error('获取容器列表失败: ' + (errData.detail || res.statusText));
+          if (!silent) ElementPlus.ElMessage.error('获取容器列表失败: ' + (errData.detail || res.statusText));
         } else {
           const data = await res.json();
-          if (data.success) containers.value = data.data.map(c => ({ ...c, _loading: false }));
+          if (data.success) mergeContainers(data.data);
         }
         loadUpdateStatus();
-      } catch (e) { console.error(e); ElementPlus.ElMessage.error('获取容器列表请求失败'); }
-      containersLoading.value = false;
+      } catch (e) {
+        if (!silent) { console.error(e); ElementPlus.ElMessage.error('获取容器列表请求失败'); }
+      }
+      if (!silent) containersLoading.value = false;
       loadContainerStats();
     }
     async function loadContainerStats() {
@@ -2533,11 +2560,14 @@ const app = createApp({
         const data = await res.json();
         if (data.success) {
           ElementPlus.ElMessage.success(data.message);
-          await loadContainers();
+          // 先从本地列表摘掉，反馈即时；再静默拉一次与后端对齐
+          containers.value = containers.value.filter(c => c.id !== row.id);
+          await loadContainers({ silent: true });
         } else {
           ElementPlus.ElMessage.error(data.detail || '删除失败');
+          await loadContainers({ silent: true });   // 失败也要回正，避免界面停在旧态
         }
-      } catch (e) { console.error(e); ElementPlus.ElMessage.error('删除请求失败'); }
+      } catch (e) { console.error(e); ElementPlus.ElMessage.error('删除请求失败'); await loadContainers({ silent: true }); }
       row._deleting = false;
     }
     function statusText(status) { const map = { running: '运行中', exited: '已停止', paused: '已暂停', restarting: '重启中', created: '已创建', dead: '已死亡' }; return map[status] || status; }
@@ -4063,12 +4093,38 @@ const app = createApp({
         if (window.ResizeObserver && hEl) new ResizeObserver(sync).observe(hEl);
       });
     }
+    // ============ 容器列表自动刷新 ============
+    // 之前只有切标签页时才拉一次，登录后停在容器页就一直不刷新：
+    // 指标列空白、别处新建/删除的容器也看不到。这里按固定节奏静默轮询。
+    const CONTAINER_POLL_MS = 5000;
+    let containerPollTimer = null;
+    let containerPollRunning = false;
+
+    function startContainerPoll() {
+      stopContainerPoll();
+      containerPollTimer = setInterval(async () => {
+        if (containerPollRunning) return;              // 上一轮还没回来就跳过，避免叠加
+        if (!isLoggedIn.value) return;
+        if (activeTab.value !== 'containers') return;   // 只在本页轮询
+        if (document.hidden) return;                    // 后台标签页不拉
+        // 有交互中的弹窗时暂停，避免覆盖用户正在看/填的内容
+        if (createContainerDialogVisible.value || detailDialogVisible.value) return;
+        containerPollRunning = true;
+        try { await loadContainers({ silent: true }); }
+        finally { containerPollRunning = false; }
+      }, CONTAINER_POLL_MS);
+    }
+    function stopContainerPoll() {
+      if (containerPollTimer) { clearInterval(containerPollTimer); containerPollTimer = null; }
+    }
+
     onMounted(async () => {
       if (isLoggedIn.value) {
         await initAppData();
+        startContainerPoll();
       }
     });
-    onUnmounted(() => { stopDetailPoll(); });
+    onUnmounted(() => { stopDetailPoll(); stopContainerPoll(); });
     watch(activeTab, (tab) => { if (tab === 'containers') loadContainers(); if (tab === 'logs') loadScheduleLogs(); if (tab === 'images') loadImages(); if (tab === 'compose') loadComposeProjects(); });
     watch(imageFilter, () => { imagePage.value = 1; });
     watch(settingsDialogVisible, (v) => { if (v) loadSettings(); });
