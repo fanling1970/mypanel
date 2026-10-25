@@ -1,6 +1,6 @@
 """MyPanel - Docker容器调度管理 FastAPI主应用（基于 docker-butler 源码私有化改造，适配 ARM 路由器）"""
 
-APP_VERSION = "2.7.3.012"
+APP_VERSION = "2.7.3.013"
 
 import asyncio
 import json
@@ -26,6 +26,7 @@ from modules import scheduler as sched
 from modules import update_checker
 from modules import cache
 from modules import file_manager
+from modules import host_terminal
 from modules.snapshot import SnapshotCollector
 
 from starlette.middleware.gzip import GZipMiddleware
@@ -1880,6 +1881,31 @@ class FilePathsRequest(BaseModel):
     dest: str = "/"          # 复制/移动的目标目录
 
 
+class FileContentReadRequest(BaseModel):
+    path: str = ""
+
+
+class FileContentWriteRequest(BaseModel):
+    path: str = ""
+    content: str = ""
+    eol: str = "LF"          # LF / CRLF
+    encoding: str = "utf-8"
+
+
+class TerminalOpenRequest(BaseModel):
+    session_id: str = ""
+
+
+class TerminalExecRequest(BaseModel):
+    session_id: str = ""
+    command: str = ""
+
+
+class TerminalCwdRequest(BaseModel):
+    session_id: str = ""
+    cwd: str = "/"
+
+
 @app.get("/api/files/roots")
 async def files_roots():
     """可浏览的宿主机根挂载点 + 磁盘占用"""
@@ -1999,3 +2025,62 @@ async def files_download(path: str = Query(..., description="宿主机文件路�
     except file_manager.FileManagerError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return _FileResponse(cont, filename=fname, media_type="application/octet-stream")
+
+
+@app.post("/api/files/read")
+async def files_read(body: FileContentReadRequest):
+    """读取文本文件内容，供在线编辑器打开。
+
+    校验顺序：类型 -> 大小(10MB) -> 二进制 -> 编码，每步都有明确中文提示。
+    """
+    try:
+        return await asyncio.to_thread(file_manager.read_text, body.path)
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/files/write")
+async def files_write(body: FileContentWriteRequest):
+    """写回文本文件内容（自动保留原权限，并留一份 .mypanel.bak）"""
+    try:
+        return await asyncio.to_thread(
+            file_manager.write_text, body.path, body.content, body.eol, body.encoding
+        )
+    except file_manager.FileManagerError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============ 宿主机终端（不是容器终端，经 nsenter 进入 PID 1 命名空间） ============
+
+@app.get("/api/terminal/status")
+async def terminal_status():
+    """终端可用性自检：缺 nsenter / 无权限时直接告诉前端原因"""
+    return await asyncio.to_thread(host_terminal.available)
+
+
+@app.post("/api/terminal/open")
+async def terminal_open(body: TerminalOpenRequest):
+    try:
+        return await asyncio.to_thread(host_terminal.open_session, body.session_id or secrets.token_hex(8))
+    except host_terminal.TerminalError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/terminal/exec")
+async def terminal_exec(body: TerminalExecRequest):
+    if not body.session_id:
+        raise HTTPException(status_code=400, detail="会话已失效，请重新连接")
+    try:
+        return await asyncio.to_thread(host_terminal.exec_command, body.session_id, body.command)
+    except host_terminal.TerminalError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/terminal/cwd")
+async def terminal_cwd(body: TerminalCwdRequest):
+    return await asyncio.to_thread(host_terminal.set_cwd, body.session_id, body.cwd)
+
+
+@app.post("/api/terminal/close")
+async def terminal_close(body: TerminalOpenRequest):
+    return await asyncio.to_thread(host_terminal.close_session, body.session_id)

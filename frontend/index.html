@@ -498,6 +498,50 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .el-dropdown-menu__item:focus-visible { background-color: var(--primary-light) !important; color: var(--primary) !important; outline: none !important; }
 .el-dropdown-menu__item--divided { border-top-color: var(--border-color) !important; }
 .el-dropdown-menu__item.is-disabled { color: var(--text-dim) !important; }
+
+/* ===== 文件编辑器 ===== */
+.ed-wrap { border: 1px solid var(--border-color, #2c3444); border-radius: 6px; overflow: hidden; background: #1e1e1e; }
+.ed-wrap.ed-light { background: #ffffff; }
+.ed-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; flex-wrap: wrap;
+  background: #252526; border-bottom: 1px solid #333; }
+.ed-wrap.ed-light .ed-toolbar { background: #f5f7fa; border-bottom-color: #dcdfe6; }
+.ed-tb-label { font-size: 12px; color: #9aa4b2; margin-left: 6px; }
+.ed-wrap.ed-light .ed-tb-label { color: #606266; }
+.ed-meta { margin-left: auto; font-size: 12px; color: #9aa4b2; }
+.ed-wrap.ed-light .ed-meta { color: #606266; }
+.ed-body { display: flex; height: 62vh; min-height: 320px; }
+.ed-gutter { width: 56px; overflow: hidden; background: #1e1e1e; border-right: 1px solid #333;
+  text-align: right; padding: 8px 0; flex: none; }
+.ed-wrap.ed-light .ed-gutter { background: #f7f8fa; border-right-color: #e4e7ed; }
+.ed-gutter-inner { will-change: transform; }
+.ed-ln { font: 13px/20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #6b7280; padding-right: 10px; height: 20px; }
+.ed-wrap.ed-light .ed-ln { color: #a8abb2; }
+.ed-text { flex: 1; border: 0; outline: none; resize: none; padding: 8px 12px;
+  font: 13px/20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #1e1e1e; color: #d4d4d4; tab-size: 2; overflow: auto; }
+.ed-wrap.ed-light .ed-text { background: #fff; color: #303133; }
+.ed-mm { width: 90px; flex: none; background: #1e1e1e; border-left: 1px solid #333; position: relative; overflow: hidden; }
+.ed-wrap.ed-light .ed-mm { background: #fafafa; border-left-color: #e4e7ed; }
+.ed-mm-text { margin: 0; padding: 4px 6px; font: 2px/2.6px ui-monospace, monospace; color: #6b7280;
+  white-space: pre; overflow: hidden; }
+.ed-mm-vp { position: absolute; left: 0; right: 0; background: rgba(120,150,200,.18); pointer-events: none; }
+
+/* ===== 宿主机终端 ===== */
+.term-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.term-wrap { height: 60vh; min-height: 320px; overflow: auto; background: #0d1117; border: 1px solid #21262d;
+  border-radius: 6px; padding: 10px 12px; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.term-line { white-space: pre-wrap; word-break: break-all; color: #c9d1d9; }
+.term-line.term-cmd { color: #79c0ff; }
+.term-line.term-err { color: #ff7b72; }
+.term-line.term-tip { color: #8b949e; font-style: italic; }
+.term-input-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.term-prompt { font: 13px ui-monospace, monospace; color: #7ee787; white-space: nowrap; max-width: 40%;
+  overflow: hidden; text-overflow: ellipsis; }
+.term-input { flex: 1; height: 32px; padding: 0 10px; border-radius: 4px;
+  border: 1px solid var(--border-color, #2c3444); background: #0d1117; color: #c9d1d9;
+  font: 13px ui-monospace, monospace; outline: none; }
+.term-input:focus { border-color: #409EFF; }
 </style>
 </head>
 <body>
@@ -1376,9 +1420,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
                   <span style="font-size: 13px; color: var(--text-secondary);">{{ fileFmtTime(row.mtime) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="240">
+              <el-table-column label="操作" width="300">
                 <template #default="{ row }">
-                  <el-button type="primary" size="small" link @click="fileOpen(row)">{{ row.is_dir ? '打开' : '下载' }}</el-button>
+                  <el-button type="primary" size="small" link @click="fileOpen(row)">打开</el-button>
+                  <el-button v-if="!row.is_dir" size="small" link @click="fileDownload([row])">下载</el-button>
                   <el-button size="small" link @click="fileCopyPath(row)">复制路径</el-button>
                   <el-button size="small" link @click="fileRename(row)">重命名</el-button>
                   <el-button type="danger" size="small" link @click="fileDelete([row])">删除</el-button>
@@ -1392,8 +1437,107 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <span>路径：{{ fileCurrentPath }}</span>
           </div>
         </el-tab-pane>
-      </el-tabs>
+          <!-- ============ 终端（宿主机，不是容器） ============ -->
+          <el-tab-pane label="终端" name="terminal">
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;">
+              <span class="term-dot" :style="{background: termReady ? '#67C23A' : '#909399'}"></span>
+              <span style="font-size: 13px; color: var(--text-secondary);">
+                {{ termReady ? '宿主机终端' : (termStatus || '未连接') }}
+              </span>
+              <span v-if="termReady" style="font-size: 12px; color: var(--text-dim);">{{ termHostInfo }}</span>
+              <span style="flex: 1;"></span>
+              <el-button size="small" @click="termConnect" :loading="termConnecting">{{ termReady ? '重新连接' : '连接' }}</el-button>
+              <el-button size="small" @click="termClear">清屏</el-button>
+              <el-button size="small" type="danger" plain @click="termDisconnect" :disabled="!termReady">断开</el-button>
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
+              <span style="font-size: 12px; color: var(--text-dim);">当前目录</span>
+              <el-tag size="small" type="info" style="font-family: monospace;">{{ termCwd }}</el-tag>
+              <el-button v-for="p in termQuickPaths" :key="p" size="small" link @click="termGoto(p)">{{ p }}</el-button>
+            </div>
+
+            <div class="term-wrap" ref="termWrapEl">
+              <div v-if="!termLines.length" class="term-line term-tip">点击「连接」进入路由器宿主机终端（非容器终端）。支持 ls / cat / df / ps / ip 等常规命令；vim、top 这类全屏交互程序不支持。</div>
+              <div v-for="(l, i) in termLines" :key="i" class="term-line" :class="'term-' + l.type">{{ l.text }}</div>
+            </div>
+
+            <div class="term-input-row">
+              <span class="term-prompt">{{ termCwd }} #</span>
+              <input class="term-input" ref="termInputEl" v-model="termInput"
+                     :disabled="!termReady || termBusy"
+                     @keydown.enter.prevent="termRun"
+                     @keydown.up.prevent="termHistPrev"
+                     @keydown.down.prevent="termHistNext"
+                     placeholder="输入命令后回车执行" />
+              <el-button size="small" type="primary" :loading="termBusy" :disabled="!termReady || !termInput.trim()" @click="termRun">执行</el-button>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
     </div>
+
+  <!-- ============ 文件编辑器 ============ -->
+  <el-dialog v-model="editorVisible" :title="'编辑 - ' + editorPath" width="88%" top="4vh"
+             :close-on-click-modal="false" @closed="editorOnClosed">
+    <div class="ed-wrap" :class="{'ed-light': editorTheme === 'light'}">
+      <div class="ed-toolbar">
+        <span class="ed-tb-label">主题</span>
+        <el-select v-model="editorTheme" size="small" style="width: 150px;">
+          <el-option label="Visual Studio Dark" value="dark" />
+          <el-option label="明亮" value="light" />
+        </el-select>
+        <span class="ed-tb-label">语言</span>
+        <el-select v-model="editorLang" size="small" style="width: 130px;">
+          <el-option v-for="l in editorLangOptions" :key="l.v" :label="l.t" :value="l.v" />
+        </el-select>
+        <span class="ed-tb-label">行尾符</span>
+        <el-select v-model="editorEol" size="small" style="width: 140px;">
+          <el-option label="LF (Linux)" value="LF" />
+          <el-option label="CRLF (Windows)" value="CRLF" />
+        </el-select>
+        <span class="ed-tb-label">自动换行</span>
+        <el-select v-model="editorWrap" size="small" style="width: 100px;">
+          <el-option label="启用" :value="true" />
+          <el-option label="禁用" :value="false" />
+        </el-select>
+        <span class="ed-tb-label">缩略图</span>
+        <el-select v-model="editorMinimap" size="small" style="width: 100px;">
+          <el-option label="启用" :value="true" />
+          <el-option label="禁用" :value="false" />
+        </el-select>
+        <span class="ed-meta">
+          {{ editorLineCount }} 行 · {{ editorSizeText }} · {{ editorEncodingLabel }}
+          <span v-if="editorReadonly" style="color:#E6A23C;">（只读）</span>
+          <span v-if="editorDirty" style="color:#E6A23C;">· 未保存</span>
+        </span>
+      </div>
+
+      <div class="ed-body">
+        <div class="ed-gutter">
+          <div class="ed-gutter-inner" :style="{transform: 'translateY(' + (-editorScrollTop) + 'px)'}">
+            <div v-for="n in editorLineCount" :key="n" class="ed-ln">{{ n }}</div>
+          </div>
+        </div>
+        <textarea ref="editorEl" class="ed-text" v-model="editorContent" spellcheck="false"
+                  :readonly="editorReadonly"
+                  :style="{whiteSpace: editorWrap ? 'pre-wrap' : 'pre', overflowWrap: editorWrap ? 'anywhere' : 'normal'}"
+                  @scroll="editorOnScroll" @keydown.tab.prevent="editorInsertTab"></textarea>
+        <div v-if="editorMinimapOn" class="ed-mm">
+          <pre class="ed-mm-text">{{ editorMiniText }}</pre>
+          <div class="ed-mm-vp" :style="editorMinimapVp"></div>
+        </div>
+      </div>
+    </div>
+    <template #footer>
+      <span style="float: left; font-size: 12px; color: var(--text-dim); line-height: 32px;">
+        保存前会自动留一份 .mypanel.bak 备份
+      </span>
+      <el-button size="small" @click="editorReset" :disabled="!editorDirty || editorReadonly">重置</el-button>
+      <el-button size="small" type="primary" :loading="editorSaving"
+                 :disabled="editorReadonly || !editorDirty" @click="editorSave">确认</el-button>
+    </template>
+  </el-dialog>
+
   </div>
 
   <!-- 新增/编辑定时任务对话框 -->
@@ -3186,10 +3330,11 @@ const app = createApp({
     }
 
     function onMainTabChange(name) {
-      if (name !== 'files') return;
-      if (fileLoadedOnce.value) return;
-      loadFileRoots();
-      loadFiles('/');
+      activeTab.value = name;
+      if (name === 'files' && !fileLoadedOnce.value) loadFiles(fileCurrentPath.value || '/');
+      if (name === 'images' && !images.value.length) loadImages();
+      // 首次进入终端页才连接，避免登录后就在后台起进程
+      if (name === 'terminal' && !termReady.value && !termConnecting.value) termConnect();
     }
 
     function fileRefresh() { return loadFiles(fileCurrentPath.value, true); }
@@ -3211,10 +3356,289 @@ const app = createApp({
       loadFiles(fileHistory.value[fileHistoryPos.value], true);
     }
 
+    // 打开：目录 -> 进入；文本文件 -> 在线编辑器；其余 -> 提示不支持
     function fileOpen(row) {
       if (!row) return;
       if (row.is_dir) { loadFiles(row.path); return; }
-      fileDownload([row]);
+      // 前端先做两道拦截，省一次往返，提示也更即时
+      if (!row.editable) { ElementPlus.ElMessage.warning('此文件不支持预览'); return; }
+      if ((row.size || 0) > 10 * 1024 * 1024) { ElementPlus.ElMessage.warning('文件超过10兆，无法打开'); return; }
+      editorOpen(row);
+    }
+
+    // ==================== 文件编辑器 ====================
+    const editorVisible = ref(false);
+    const editorEl = ref(null);
+    const editorPath = ref('');
+    const editorContent = ref('');
+    const editorRawContent = ref('');
+    const editorEol = ref('LF');
+    const editorEncoding = ref('utf-8');
+    const editorReadonly = ref(false);
+    const editorSaving = ref(false);
+    const editorTheme = ref('dark');
+    const editorLang = ref('plaintext');
+    const editorWrap = ref(true);
+    const editorMinimap = ref(true);
+    const editorScrollTop = ref(0);
+    const editorSize = ref(0);
+
+    const editorLangOptions = [
+      { v: 'plaintext', t: '纯文本' }, { v: 'yaml', t: 'yaml' }, { v: 'json', t: 'json' },
+      { v: 'xml', t: 'xml' }, { v: 'ini', t: 'ini' }, { v: 'shell', t: 'shell' },
+      { v: 'python', t: 'python' }, { v: 'javascript', t: 'javascript' }, { v: 'css', t: 'css' },
+      { v: 'html', t: 'html' }, { v: 'sql', t: 'sql' }, { v: 'markdown', t: 'markdown' },
+      { v: 'nginx', t: 'nginx' }, { v: 'dockerfile', t: 'dockerfile' },
+    ];
+
+    // 按扩展名猜语言，只是给下拉框一个合理默认值，不影响编辑
+    function editorGuessLang(name) {
+      const low = (name || '').toLowerCase();
+      const ext = low.includes('.') ? low.split('.').pop() : '';
+      const map = {
+        yaml: 'yaml', yml: 'yaml', json: 'json', json5: 'json', xml: 'xml', plist: 'xml',
+        ini: 'ini', conf: 'ini', cfg: 'ini', properties: 'ini', toml: 'ini', env: 'ini',
+        sh: 'shell', bash: 'shell', zsh: 'shell', py: 'python', js: 'javascript', mjs: 'javascript',
+        cjs: 'javascript', ts: 'javascript', css: 'css', scss: 'css', less: 'css',
+        html: 'html', htm: 'html', vue: 'html', sql: 'sql',
+        md: 'markdown', markdown: 'markdown', rst: 'markdown',
+      };
+      if (low === 'dockerfile') return 'dockerfile';
+      if (low.startsWith('nginx') || low.endsWith('.nginx.conf')) return 'nginx';
+      return map[ext] || 'plaintext';
+    }
+
+    const editorLineCount = computed(() => {
+      const t = editorContent.value || '';
+      let n = 1;
+      for (let i = 0; i < t.length; i++) if (t.charCodeAt(i) === 10) n++;
+      return n;
+    });
+    const editorDirty = computed(() => editorContent.value !== editorRawContent.value);
+    const editorMinimapOn = computed(() => !!editorMinimap.value);
+    const editorSizeText = computed(() => fileFmtSize(editorSize.value));
+    const editorEncodingLabel = computed(() => (editorEncoding.value || 'utf-8').toUpperCase());
+    // 缩略图：只取前若干行渲染成缩略文本，够看结构即可，别把 DOM 拖垮
+    const editorMiniText = computed(() => {
+      const lines = (editorContent.value || '').split('\n').slice(0, 600);
+      return lines.map(l => (l.length > 120 ? l.slice(0, 120) : l)).join('\n');
+    });
+    const editorMinimapVp = computed(() => {
+      const total = Math.max(editorLineCount.value, 1);
+      const visible = 40;
+      const h = Math.max(8, Math.min(100, (visible / total) * 100));
+      const top = Math.min(100 - h, (editorScrollTop.value / (total * 20 || 1)) * 100);
+      return { height: h + '%', top: Math.max(0, top) + '%' };
+    });
+
+    async function editorOpen(row) {
+      editorPath.value = row.path;
+      editorLang.value = editorGuessLang(row.name);
+      editorTheme.value = 'dark';
+      editorWrap.value = true;
+      editorMinimap.value = true;
+      editorScrollTop.value = 0;
+      editorContent.value = '';
+      editorRawContent.value = '';
+      editorReadonly.value = false;
+      editorSize.value = row.size || 0;
+      editorVisible.value = true;
+      try {
+        const res = await apiFetch('/api/files/read', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: row.path }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          editorVisible.value = false;
+          ElementPlus.ElMessage.warning(data.detail || '此文件不支持预览');
+          return;
+        }
+        editorContent.value = data.content || '';
+        editorRawContent.value = data.content || '';
+        editorEol.value = data.eol || 'LF';
+        editorEncoding.value = data.encoding || 'utf-8';
+        editorReadonly.value = !!data.readonly;
+        editorSize.value = data.size || 0;
+      } catch (e) {
+        editorVisible.value = false;
+        ElementPlus.ElMessage.error('读取文件失败');
+      }
+    }
+
+    function editorOnClosed() {
+      editorContent.value = '';
+      editorRawContent.value = '';
+      editorScrollTop.value = 0;
+    }
+    function editorOnScroll(e) {
+      editorScrollTop.value = e.target.scrollTop;
+    }
+    // Tab 插入两个空格，而不是把焦点移走
+    function editorInsertTab(e) {
+      const el = e.target;
+      const start = el.selectionStart, end = el.selectionEnd;
+      editorContent.value = editorContent.value.slice(0, start) + '  ' + editorContent.value.slice(end);
+      requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = start + 2; });
+    }
+    function editorReset() {
+      editorContent.value = editorRawContent.value;
+    }
+    async function editorSave() {
+      if (editorReadonly.value || !editorDirty.value) return;
+      editorSaving.value = true;
+      try {
+        const res = await apiFetch('/api/files/write', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: editorPath.value, content: editorContent.value,
+            eol: editorEol.value, encoding: editorEncoding.value,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          ElementPlus.ElMessage.error(data.detail || '保存失败');
+        } else {
+          ElementPlus.ElMessage.success('已保存');
+          editorRawContent.value = editorContent.value;
+          loadFiles(fileCurrentPath.value);
+        }
+      } catch (e) {
+        ElementPlus.ElMessage.error('保存请求失败');
+      }
+      editorSaving.value = false;
+    }
+
+    // ==================== 宿主机终端（不是容器终端） ====================
+    const termWrapEl = ref(null);
+    const termInputEl = ref(null);
+    const termReady = ref(false);
+    const termConnecting = ref(false);
+    const termStatus = ref('');
+    const termHostInfo = ref('');
+    const termBusy = ref(false);
+    const termCwd = ref('/');
+    const termInput = ref('');
+    const termSessionId = ref('');
+    const termLines = ref([]);
+    const termQuickPaths = ['/', '/etc', '/root', '/tmp', '/var/log'];
+    const termHistory = [];
+    let termHistPos = -1;
+
+    const TERM_MAX_LINES = 2000;
+
+    function termPush(text, type) {
+      termLines.value.push({ text: text, type: type || 'out' });
+      if (termLines.value.length > TERM_MAX_LINES) {
+        termLines.value.splice(0, termLines.value.length - TERM_MAX_LINES);
+      }
+      nextTick(() => {
+        const el = termWrapEl.value;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    }
+    function termClear() { termLines.value = []; }
+
+    async function termConnect() {
+      termConnecting.value = true;
+      termStatus.value = '';
+      try {
+        const res = await apiFetch('/api/terminal/open', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: termSessionId.value || '' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          termReady.value = false;
+          termStatus.value = data.detail || '无法连接宿主机终端';
+          ElementPlus.ElMessage.warning(termStatus.value);
+        } else {
+          termSessionId.value = data.session_id || '';
+          termCwd.value = data.cwd || '/';
+          termHostInfo.value = data.host || '';
+          termReady.value = true;
+          termStatus.value = '';
+          termPush('已连接宿主机：' + (data.host || '(unknown)'), 'tip');
+          termPush('提示：这是路由器宿主机终端；vim/top 等全屏交互程序不支持。', 'tip');
+          nextTick(() => { if (termInputEl.value) termInputEl.value.focus(); });
+        }
+      } catch (e) {
+        termReady.value = false;
+        termStatus.value = '连接请求失败';
+      }
+      termConnecting.value = false;
+    }
+
+    async function termDisconnect() {
+      const sid = termSessionId.value;
+      termReady.value = false;
+      termSessionId.value = '';
+      termStatus.value = '';
+      if (sid) {
+        try {
+          await apiFetch('/api/terminal/close', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sid }),
+          });
+        } catch (e) { /* 断开失败不影响本地状态 */ }
+      }
+      termPush('已断开', 'tip');
+    }
+
+    async function termRun() {
+      const cmd = (termInput.value || '').trim();
+      if (!cmd || !termReady.value || termBusy.value) return;
+      termHistory.push(cmd);
+      if (termHistory.length > 100) termHistory.shift();
+      termHistPos = termHistory.length;
+      termPush(termCwd.value + ' # ' + cmd, 'cmd');
+      termInput.value = '';
+      termBusy.value = true;
+      try {
+        const res = await apiFetch('/api/terminal/exec', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: termSessionId.value, command: cmd }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          termPush(data.detail || '执行失败', 'err');
+        } else {
+          if (data.output) termPush(data.output, data.exit_code ? 'err' : 'out');
+          if (data.cwd) termCwd.value = data.cwd;
+        }
+      } catch (e) {
+        termPush('请求失败', 'err');
+      }
+      termBusy.value = false;
+      nextTick(() => { if (termInputEl.value) termInputEl.value.focus(); });
+    }
+
+    async function termGoto(p) {
+      if (!termReady.value) return;
+      try {
+        await apiFetch('/api/terminal/cwd', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: termSessionId.value, cwd: p }),
+        });
+        // 顺便验证目录是否存在，不存在会让 shell 回退到 /
+        const res = await apiFetch('/api/terminal/exec', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: termSessionId.value, command: 'pwd' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.cwd) termCwd.value = data.cwd;
+      } catch (e) { /* 忽略 */ }
+    }
+
+    function termHistPrev() {
+      if (!termHistory.length) return;
+      termHistPos = Math.max(0, termHistPos - 1);
+      termInput.value = termHistory[termHistPos] || '';
+    }
+    function termHistNext() {
+      if (!termHistory.length) return;
+      termHistPos = Math.min(termHistory.length, termHistPos + 1);
+      termInput.value = termHistPos >= termHistory.length ? '' : (termHistory[termHistPos] || '');
     }
 
 
@@ -4167,6 +4591,15 @@ const app = createApp({
       fileDisk, fileImportInput, fileHistory, fileHistoryPos, filteredFileEntries, fileParentPath,
       fileBreadcrumbs, onMainTabChange, loadFiles, fileRefresh, fileGoUp, fileBack, fileForward,
       fileOpen, isFileChecked, fileToggleRow, fileToggleAll, fileAllChecked, fileIndeterminate, fileNewFolder, fileNewFile, filePickUpload, onFileUpload,
+      // 编辑器
+      editorVisible, editorEl, editorPath, editorContent, editorEol, editorEncoding, editorReadonly, editorSaving,
+      editorTheme, editorLang, editorWrap, editorMinimap, editorLangOptions, editorLineCount, editorSizeText,
+      editorEncodingLabel, editorDirty, editorMinimapOn, editorMiniText, editorMinimapVp,
+      editorOnClosed, editorOnScroll, editorInsertTab, editorReset, editorSave,
+      // 终端
+      termWrapEl, termInputEl, termReady, termConnecting, termStatus, termHostInfo, termBusy, termCwd,
+      termInput, termLines, termQuickPaths, termConnect, termDisconnect, termClear, termRun, termGoto,
+      termHistPrev, termHistNext,
       fileDownload, fileCopyPath, fileRename, fileEditPermission, fileDelete, fileTransfer, fileFmtSize, fileFmtTime,
       // Compose
       composeProjects, composeLoading, composeSearch, composePage, composePageSize,

@@ -31,6 +31,157 @@ PROTECTED_FIRST_LEVEL = {
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 单文件 2GB 上限
 
+# ============ 在线编辑 / 预览 ============
+# 超过这个大小一律拒绝在浏览器里打开（10MB 的文本足以卡死页面）
+MAX_PREVIEW_BYTES = 10 * 1024 * 1024
+
+# 允许在线查看/编辑的扩展名。只放纯文本类，
+# 二进制（可执行文件、压缩包、镜像）不进去，避免读成乱码再写坏文件。
+TEXT_EXTENSIONS = {
+    # 配置 / 数据
+    "conf", "cfg", "ini", "config", "properties", "env", "toml", "yaml", "yml",
+    "json", "json5", "xml", "plist", "csv", "tsv", "lock", "list", "repo",
+    # 脚本
+    "sh", "bash", "zsh", "fish", "py", "pyw", "pl", "lua", "rb", "php",
+    "js", "mjs", "cjs", "ts", "jsx", "tsx", "vue", "svelte", "css", "scss", "less",
+    # 文档 / 文本
+    "txt", "md", "markdown", "rst", "log", "text", "nfo", "diff", "patch",
+    "html", "htm", "sql", "go", "rs", "java", "c", "h", "cpp", "hpp", "cs",
+    "swift", "kt", "gradle", "dockerfile", "makefile", "gitignore", "dockerignore",
+}
+
+# 没有扩展名但通常是文本的文件名
+TEXT_FILENAMES = {
+    "dockerfile", "makefile", "readme", "license", "changelog", "authors",
+    "gitignore", "dockerignore", "env", ".env", "hosts", "passwd", "group",
+    "fstab", "crontab", "nginx.conf",
+}
+
+
+def is_editable_name(name: str) -> bool:
+    """按文件名判断是否属于可在线编辑的纯文本类型"""
+    if not name:
+        return False
+    low = name.lower()
+    if low in TEXT_FILENAMES:
+        return True
+    if low.startswith(".env"):
+        return True
+    ext = low.rsplit(".", 1)[-1] if "." in low else ""
+    return bool(ext) and ext in TEXT_EXTENSIONS
+
+
+def _decode_text(raw: bytes) -> tuple[str, str]:
+    """尝试解码为文本，返回 (内容, 编码)。全部失败则抛错"""
+    for enc in ("utf-8-sig", "utf-8", "gb18030", "latin-1"):
+        try:
+            return raw.decode(enc), enc
+        except (UnicodeDecodeError, LookupError):
+            continue
+    raise FileManagerError("此文件不支持预览")
+
+
+def read_text(host_path: str) -> dict:
+    """读取宿主机文本文件内容，供在线编辑器使用。
+
+    三道校验，顺序刻意：先看类型（便宜），再看大小，最后才读盘。
+    """
+    cont, host_norm = to_container_path(host_path)
+    if not os.path.exists(cont):
+        raise FileManagerError("文件不存在")
+    if os.path.isdir(cont):
+        raise FileManagerError("该路径是目录")
+    if not is_editable_name(os.path.basename(host_norm)):
+        raise FileManagerError("此文件不支持预览")
+
+    try:
+        size = os.path.getsize(cont)
+    except OSError:
+        raise FileManagerError("无法读取文件信息")
+    if size > MAX_PREVIEW_BYTES:
+        raise FileManagerError("文件超过10兆，无法打开")
+
+    try:
+        with open(cont, "rb") as f:
+            raw = f.read()
+    except PermissionError:
+        raise FileManagerError("没有权限读取该文件")
+    except OSError as e:
+        raise FileManagerError(f"读取失败：{e}")
+
+    # NUL 字节基本只出现在二进制里，按“不支持预览”处理，避免把乱码写回去
+    if b"\x00" in raw[:8192]:
+        raise FileManagerError("此文件不支持预览")
+
+    content, encoding = _decode_text(raw)
+    crlf = content.count("\r\n")
+    lf_only = content.count("\n") - crlf
+    eol = "CRLF" if crlf > lf_only else "LF"
+
+    st = os.stat(cont)
+    return {
+        "success": True,
+        "path": host_norm,
+        "name": os.path.basename(host_norm),
+        "content": content.replace("\r\n", "\n"),
+        "size": size,
+        "encoding": encoding,
+        "eol": eol,
+        "mode": _mode_str(st),
+        "mtime": int(st.st_mtime),
+        "readonly": not os.access(cont, os.W_OK),
+    }
+
+
+def write_text(host_path: str, content: str, eol: str = "LF", encoding: str = "utf-8") -> dict:
+    """写回宿主机文本文件。写前留一份 .bak，避免改坏配置后无法回退。"""
+    cont, host_norm = to_container_path(host_path)
+    if not os.path.exists(cont):
+        raise FileManagerError("文件不存在")
+    if os.path.isdir(cont):
+        raise FileManagerError("该路径是目录")
+    if not is_editable_name(os.path.basename(host_norm)):
+        raise FileManagerError("此文件不支持编辑")
+    if not os.access(cont, os.W_OK):
+        raise FileManagerError("没有写入权限")
+
+    data = content.replace("\r\n", "\n")
+    if str(eol).upper() == "CRLF":
+        data = data.replace("\n", "\r\n")
+
+    enc = encoding if encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1") else "utf-8"
+    payload = data.encode(enc, errors="surrogateescape") if enc != "utf-8-sig" else data.encode("utf-8-sig", errors="surrogateescape")
+
+    # 保留原文件权限位：直接 open 会沿用已有 inode 的权限，这里仅做兜底校验
+    try:
+        st = os.stat(cont)
+        backup_path = cont + ".mypanel.bak"
+        try:
+            with open(cont, "rb") as src, open(backup_path, "wb") as dst:
+                dst.write(src.read())
+            os.chmod(backup_path, stat.S_IMODE(st.st_mode))
+        except OSError:
+            pass
+
+        with open(cont, "wb") as f:
+            f.write(payload)
+        try:
+            os.chmod(cont, stat.S_IMODE(st.st_mode))
+        except OSError:
+            pass
+    except PermissionError:
+        raise FileManagerError("没有写入权限")
+    except OSError as e:
+        raise FileManagerError(f"保存失败：{e}")
+
+    return {
+        "success": True,
+        "path": host_norm,
+        "size": len(payload),
+        "encoding": enc,
+        "message": "已保存",
+    }
+
 
 class FileManagerError(Exception):
     """可直接展示给用户的文件操作错误"""
@@ -202,6 +353,7 @@ def list_dir(host_path: str, show_hidden: bool = True) -> dict:
                     "mtime": int(st.st_mtime),
                     "mode": _mode_str(st),
                     "owner": getattr(st, "st_uid", None),
+                    "editable": (not is_dir) and is_editable_name(name),
                 })
     except PermissionError:
         raise FileManagerError("没有权限读取该目录")
