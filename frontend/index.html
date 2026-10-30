@@ -527,25 +527,55 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   white-space: pre; overflow: hidden; }
 .ed-mm-vp { position: absolute; left: 0; right: 0; background: rgba(120,150,200,.18); pointer-events: none; }
 
-/* ===== 宿主机终端 ===== */
+/* ===== 宿主机终端（类 xterm 风格） ===== */
 .term-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-.term-wrap { height: 60vh; min-height: 320px; overflow: auto; background: #0d1117; border: 1px solid #21262d;
-  border-radius: 6px; padding: 10px 12px; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.term-line { white-space: pre-wrap; word-break: break-all; color: #c9d1d9; }
-.term-line.term-cmd { color: #79c0ff; }
-.term-line.term-err { color: #ff7b72; }
-.term-line.term-tip { color: #8b949e; font-style: italic; }
-.term-input-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-.term-prompt { font: 13px ui-monospace, monospace; color: #7ee787; white-space: nowrap; max-width: 40%;
-  overflow: hidden; text-overflow: ellipsis; }
-.term-input { flex: 1; height: 32px; padding: 0 10px; border-radius: 4px;
-  border: 1px solid var(--border-color, #2c3444); background: #0d1117; color: #c9d1d9;
-  font: 13px ui-monospace, monospace; outline: none; }
-.term-input:focus { border-color: #409EFF; }
+.term-shell { display: flex; flex-direction: column; height: 62vh; min-height: 340px;
+  background: #0c0c0c; border: 1px solid #1f242c; border-radius: 8px; overflow: hidden; }
+.term-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  background: #161b22; border-bottom: 1px solid #21262d; }
+.term-bar-dots { display: flex; gap: 6px; }
+.term-bar-dots i { display: block; width: 10px; height: 10px; border-radius: 50%; }
+.term-bar-title { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #8b949e;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46%; }
+.term-bar-link { font: 12px ui-monospace, monospace; color: #6e7681; cursor: pointer; padding: 1px 4px; border-radius: 3px; }
+.term-bar-link:hover { color: #7ee787; background: rgba(126,231,135,.1); }
+.term-wrap { flex: 1; overflow: auto; padding: 8px 12px 10px;
+  font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.term-line { white-space: pre-wrap; word-break: break-all; color: #d4d4d4; }
+.term-line.term-cmd { color: #4ec9b0; }
+.term-line.term-err { color: #f14c4c; }
+.term-line.term-tip { color: #7d8590; font-style: italic; }
+/* 末行：内联提示符 + 无边框输入 + 闪烁光标 */
+.term-prompt-line { display: flex; align-items: baseline; gap: 6px; }
+.term-prompt { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #7ee787;
+  white-space: nowrap; max-width: 52%; overflow: hidden; text-overflow: ellipsis; }
+.term-inline-input { flex: 1; min-width: 0; padding: 0; border: 0; outline: none; background: transparent;
+  color: #d4d4d4; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; caret-color: #7ee787; }
+.term-inline-input:disabled { color: #6e7681; caret-color: transparent; }
+.term-caret { display: inline-block; width: 7px; height: 15px; background: #7ee787; vertical-align: -3px;
+  animation: termBlink 1.05s steps(1) infinite; }
+@keyframes termBlink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+/* ===== 无活动自动休眠提示 ===== */
+.sleep-banner { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); z-index: 3000;
+  display: flex; align-items: center; gap: 10px; max-width: min(620px, 92vw);
+  padding: 10px 16px; border-radius: 999px; background: rgba(20,24,31,.94);
+  border: 1px solid rgba(126,231,135,.28); box-shadow: 0 8px 28px rgba(0,0,0,.38);
+  color: #d4d4d4; font-size: 13px; line-height: 1.45; cursor: pointer;
+  animation: sleepIn .28s ease-out; }
+.sleep-banner .sleep-ico { font-size: 16px; }
+.sleep-banner b { color: #7ee787; font-weight: 600; margin-right: 6px; }
+.sleep-banner .sleep-sub { color: #8b949e; }
+@keyframes sleepIn { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 </style>
 </head>
 <body>
 <div id="app" v-cloak>
+  <!-- ============ 无活动休眠提示（点击唤醒） ============ -->
+  <div v-if="sleeping" class="sleep-banner" @click="wakeUp">
+    <span class="sleep-ico">💤</span>
+    <div><b>面板已休眠</b><span class="sleep-sub">5 分钟无操作，已暂停后台轮询以降低占用。移动鼠标、按任意键或点此唤醒。</span></div>
+  </div>
   <!-- 登录页 -->
   <div v-if="!isLoggedIn" class="login-page">
     <div class="login-card">
@@ -1451,26 +1481,30 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <el-button size="small" type="danger" plain @click="termDisconnect" :disabled="!termReady">断开</el-button>
             </div>
 
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
-              <span style="font-size: 12px; color: var(--text-dim);">当前目录</span>
-              <el-tag size="small" type="info" style="font-family: monospace;">{{ termCwd }}</el-tag>
-              <el-button v-for="p in termQuickPaths" :key="p" size="small" link @click="termGoto(p)">{{ p }}</el-button>
-            </div>
-
-            <div class="term-wrap" ref="termWrapEl">
-              <div v-if="!termLines.length" class="term-line term-tip">点击「连接」进入路由器宿主机终端（非容器终端）。支持 ls / cat / df / ps / ip 等常规命令；vim、top 这类全屏交互程序不支持。</div>
-              <div v-for="(l, i) in termLines" :key="i" class="term-line" :class="'term-' + l.type">{{ l.text }}</div>
-            </div>
-
-            <div class="term-input-row">
-              <span class="term-prompt">{{ termCwd }} #</span>
-              <input class="term-input" ref="termInputEl" v-model="termInput"
-                     :disabled="!termReady || termBusy"
-                     @keydown.enter.prevent="termRun"
-                     @keydown.up.prevent="termHistPrev"
-                     @keydown.down.prevent="termHistNext"
-                     placeholder="输入命令后回车执行" />
-              <el-button size="small" type="primary" :loading="termBusy" :disabled="!termReady || !termInput.trim()" @click="termRun">执行</el-button>
+            <div class="term-shell">
+              <div class="term-bar">
+                <div class="term-bar-dots">
+                  <i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i>
+                </div>
+                <span class="term-bar-title">{{ termReady ? ((termHostInfo || 'host') + ' · ' + termCwd) : '未连接宿主机' }}</span>
+                <span style="flex: 1;"></span>
+                <span class="term-bar-link" v-for="p in termQuickPaths" :key="p" @click="termGoto(p)">{{ p }}</span>
+              </div>
+              <div class="term-wrap" ref="termWrapEl" @click="focusTermInput">
+                <div v-if="!termLines.length" class="term-line term-tip">点击上方「连接」进入路由器宿主机终端（非容器终端）。支持 ls / cat / df / ps / ip 等常规命令；vim、top 这类全屏交互程序不支持。</div>
+                <div v-for="(l, i) in termLines" :key="i" class="term-line" :class="'term-' + l.type">{{ l.text }}</div>
+                <div class="term-prompt-line" v-if="termReady">
+                  <span class="term-prompt">{{ termCwd }} #</span>
+                  <span v-if="!termInput && !termFocused" class="term-caret"></span>
+                  <input class="term-inline-input" ref="termInputEl" v-model="termInput"
+                         :disabled="termBusy"
+                         spellcheck="false" autocomplete="off" autocapitalize="off"
+                         @focus="termFocused = true" @blur="termFocused = false"
+                         @keydown.enter.prevent="termRun"
+                         @keydown.up.prevent="termHistPrev"
+                         @keydown.down.prevent="termHistNext" />
+                </div>
+              </div>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -2117,6 +2151,7 @@ const app = createApp({
 
     function doLogout() {
       stopContainerPoll();
+      sleeping.value = false;
       isLoggedIn.value = false;
       authToken.value = '';
       currentUser.value = '';
@@ -3519,6 +3554,7 @@ const app = createApp({
     const termBusy = ref(false);
     const termCwd = ref('/');
     const termInput = ref('');
+    const termFocused = ref(false);
     const termSessionId = ref('');
     const termLines = ref([]);
     const termQuickPaths = ['/', '/etc', '/root', '/tmp', '/var/log'];
@@ -3538,6 +3574,10 @@ const app = createApp({
       });
     }
     function termClear() { termLines.value = []; }
+    function focusTermInput() {
+      if (!termReady.value || termBusy.value) return;
+      nextTick(() => { if (termInputEl.value) termInputEl.value.focus(); });
+    }
 
     async function termConnect() {
       termConnecting.value = true;
@@ -4517,6 +4557,57 @@ const app = createApp({
         if (window.ResizeObserver && hEl) new ResizeObserver(sync).observe(hEl);
       });
     }
+    // ============ 5 分钟无活动自动休眠 ============
+    // 目的：面板挂在墙上没人看时不再定时拉接口，把空闲 CPU / 请求降到最低；
+    // 一旦有鼠标、键盘、触摸、滚动或页面重新可见，立刻唤醒并刷新一次数据。
+    const SLEEP_IDLE_MS = 5 * 60 * 1000;   // 5 分钟无活动 → 休眠
+    const SLEEP_TICK_MS = 20000;           // 每 20 秒巡检一次
+    const sleeping = ref(false);
+    let sleepLastActivity = Date.now();
+    let sleepTicker = null;
+    let sleepBound = false;
+
+    function goSleep() {
+      if (sleeping.value) return;
+      sleeping.value = true;
+      stopContainerPoll();
+      stopDetailPoll();
+    }
+
+    function wakeUp() {
+      sleepLastActivity = Date.now();
+      if (!sleeping.value) return;
+      sleeping.value = false;
+      if (!isLoggedIn.value) return;
+      // 唤醒后立刻补一帧数据，避免界面停在旧值
+      const tab = activeTab.value;
+      if (tab === 'containers') { loadContainers({ silent: true }); startContainerPoll(); }
+      else if (tab === 'images') { loadImages(); }
+      else if (tab === 'compose') { loadComposeProjects(); }
+      else if (tab === 'logs') { loadScheduleLogs(); }
+    }
+
+    function markActivity() {
+      sleepLastActivity = Date.now();
+      if (sleeping.value) wakeUp();
+    }
+
+    function bindSleepWatch() {
+      if (sleepBound) return;
+      sleepBound = true;
+      // 用捕获阶段监听，任何交互都算活动；mousemove 也计入，避免"只是移动鼠标"被误判休眠
+      const evts = ['mousedown', 'mousemove', 'keydown', 'wheel', 'touchstart', 'scroll'];
+      evts.forEach((e) => window.addEventListener(e, markActivity, { passive: true, capture: true }));
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) markActivity(); });
+      window.addEventListener('focus', markActivity);
+      sleepTicker = setInterval(() => {
+        if (!isLoggedIn.value) return;
+        if (sleeping.value) return;
+        if (Date.now() - sleepLastActivity >= SLEEP_IDLE_MS) goSleep();
+      }, SLEEP_TICK_MS);
+    }
+    bindSleepWatch();
+
     // ============ 容器列表自动刷新 ============
     // 之前只有切标签页时才拉一次，登录后停在容器页就一直不刷新：
     // 指标列空白、别处新建/删除的容器也看不到。这里按固定节奏静默轮询。
@@ -4530,6 +4621,7 @@ const app = createApp({
         if (containerPollRunning) return;              // 上一轮还没回来就跳过，避免叠加
         if (!isLoggedIn.value) return;
         if (activeTab.value !== 'containers') return;   // 只在本页轮询
+        if (sleeping.value) return;                     // 休眠中不拉
         if (document.hidden) return;                    // 后台标签页不拉
         // 有交互中的弹窗时暂停，避免覆盖用户正在看/填的内容
         if (createContainerDialogVisible.value || detailDialogVisible.value) return;
@@ -4548,7 +4640,7 @@ const app = createApp({
         startContainerPoll();
       }
     });
-    onUnmounted(() => { stopDetailPoll(); stopContainerPoll(); });
+    onUnmounted(() => { stopDetailPoll(); stopContainerPoll(); if (sleepTicker) { clearInterval(sleepTicker); sleepTicker = null; } });
     watch(activeTab, (tab) => { if (tab === 'containers') loadContainers(); if (tab === 'logs') loadScheduleLogs(); if (tab === 'images') loadImages(); if (tab === 'compose') loadComposeProjects(); });
     watch(imageFilter, () => { imagePage.value = 1; });
     watch(settingsDialogVisible, (v) => { if (v) loadSettings(); });
@@ -4599,6 +4691,7 @@ const app = createApp({
       // 终端
       termWrapEl, termInputEl, termReady, termConnecting, termStatus, termHostInfo, termBusy, termCwd,
       termInput, termLines, termQuickPaths, termConnect, termDisconnect, termClear, termRun, termGoto,
+      termFocused, focusTermInput, sleeping, wakeUp,
       termHistPrev, termHistNext,
       fileDownload, fileCopyPath, fileRename, fileEditPermission, fileDelete, fileTransfer, fileFmtSize, fileFmtTime,
       // Compose
