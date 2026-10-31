@@ -761,6 +761,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <template #header><span class="sortable-header" @click="toggleSort('name')">名称 <span class="sort-arrow" :class="{active: sortKey==='name'}">{{ sortKey==='name' ? (sortOrder==='asc' ? '▲' : '▼') : '⇅' }}</span></span></template>
               <template #default="{ row }">
                 <span class="container-name-link" :title="row.description ? row.name + ' - ' + row.description : row.name" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" @click.stop="openContainerDetail(row)">{{ row.name }}<el-tag v-if="row.is_self" size="small" type="warning" effect="dark" style="margin-left:6px;vertical-align:middle;">本服务</el-tag><el-tag v-if="row.description" size="small" type="info" effect="plain" style="margin-left:6px;vertical-align:middle;" :title="row.description">{{ row.description }}</el-tag></span>
+                <div v-if="isMobile && row.ports && row.ports.length" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;">
+                  <a v-for="p in row.ports" :key="'m-' + p" :href="portLink(p)" target="_blank" class="port-link" @click.stop>{{ portLabel(p) }}</a>
+                </div>
               </template>
             </el-table-column>
             <el-table-column width="55">
@@ -1129,6 +1132,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <el-table-column label="项目名称" min-width="120">
               <template #default="{ row }">
                 <span style="cursor: pointer; color: var(--primary); font-weight: 500;" @click.stop="openComposeDetail(row)">{{ row.name }}<el-tag v-if="row.is_self" size="small" type="warning" effect="dark" style="margin-left:6px;vertical-align:middle;">本服务</el-tag><el-tag v-if="row.description" size="small" type="info" effect="plain" style="margin-left:6px;vertical-align:middle;" :title="row.description">{{ row.description }}</el-tag></span>
+                <div v-if="isMobile && row.ports && row.ports.length" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;">
+                  <a v-for="p in row.ports" :key="'m-' + p" :href="portLink(p)" target="_blank" class="port-link" @click.stop>{{ portLabel(p) }}</a>
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="状态" width="90">
@@ -2348,9 +2354,14 @@ const app = createApp({
     // ============ 容器管理 ============
     const containers = ref([]);
     const containersLoading = ref(false);
-    const updatableCount = computed(() => { let count = 0; for (const name in updateResults.value) { if (updateResults.value[name].has_update === true) count++; } return count; });
+    // 卡片数字必须和列表用同一份数据、同一个判定，否则点卡片和列表对不上
+    // （之前 updatableCount 统计的是 updateResults 里的 key，里面可能残留已删除容器）
     const runningCount = computed(() => containers.value.filter(c => c.status === 'running').length);
     const stoppedCount = computed(() => containers.value.filter(c => c.status !== 'running').length);
+    const updatableCount = computed(() => containers.value.filter(c => {
+      const r = updateResults.value[c.name];
+      return !!(r && r.has_update === true);
+    }).length);
     const containerPage = ref(1);
     const containerPageSize = ref(50);
     // 自身容器名（从容器列表动态获取，兼容新旧部署名）
@@ -2377,8 +2388,28 @@ const app = createApp({
       if (!addrs || !addrs.length) return '-';
       return addrs.map(a => a.includes(':') ? a.split(':').pop() : a).join(', ');
     }
-    function filterByStat(type) { if (statFilter.value === type) { statFilter.value = ''; containerStatusFilter.value = ''; } else { statFilter.value = type; activeTab.value = 'containers'; containerPage.value = 1; if (type === 'running') containerStatusFilter.value = 'running'; else if (type === 'stopped') containerStatusFilter.value = 'exited'; else if (type === 'updatable') containerStatusFilter.value = ''; else containerStatusFilter.value = ''; } }
-    const filteredContainers = computed(() => { let list = containers.value; if (containerStatusFilter.value) list = list.filter(c => c.status === containerStatusFilter.value); if (statFilter.value === 'updatable') list = list.filter(c => { const r = updateResults.value[c.name]; return r && r.has_update === true; }); if (containerSearch.value) { const q = containerSearch.value.toLowerCase(); list = list.filter(c => c.name.toLowerCase().includes(q) || c.image.toLowerCase().includes(q)); } return list; });
+    // 卡片点击只改 statFilter，不再借道下拉框（借道会被下拉框的 watch 反向清空）
+    let statFromCard = false;
+    function filterByStat(type) {
+      const same = statFilter.value === type;
+      statFromCard = true;
+      statFilter.value = same ? '' : type;
+      if (containerStatusFilter.value) containerStatusFilter.value = '';
+      if (!same) { activeTab.value = 'containers'; containerPage.value = 1; }
+      nextTick(() => { statFromCard = false; });
+    }
+    const filteredContainers = computed(() => {
+      let list = containers.value;
+      const st = statFilter.value;
+      // 「已停止」要包含 exited / created / paused / dead 等所有非运行状态，
+      // 只按 exited 过滤会把 created、paused 的容器漏掉（卡片有 1 台、列表却 0 台）
+      if (st === 'running') list = list.filter(c => c.status === 'running');
+      else if (st === 'stopped') list = list.filter(c => c.status !== 'running');
+      else if (st === 'updatable') list = list.filter(c => { const r = updateResults.value[c.name]; return !!(r && r.has_update === true); });
+      if (containerStatusFilter.value) list = list.filter(c => c.status === containerStatusFilter.value);
+      if (containerSearch.value) { const q = containerSearch.value.toLowerCase(); list = list.filter(c => c.name.toLowerCase().includes(q) || c.image.toLowerCase().includes(q)); }
+      return list;
+    });
     const sortedContainers = computed(() => {
       const list = filteredContainers.value;
       if (!sortKey.value || !sortOrder.value) return list;
@@ -2405,7 +2436,13 @@ const app = createApp({
     const paginatedContainers = computed(() => { const start = (containerPage.value - 1) * containerPageSize.value; return sortedContainers.value.slice(start, start + containerPageSize.value); });
     function onContainerPageSizeChange() { containerPage.value = 1; }
     watch(containerSearch, () => { containerPage.value = 1; });
-    watch(containerStatusFilter, (val) => { containerPage.value = 1; if (!val) statFilter.value = ''; else if (val === 'running') statFilter.value = 'running'; else if (val === 'exited') statFilter.value = 'stopped'; });
+    watch(containerStatusFilter, (val) => {
+      containerPage.value = 1;
+      if (statFromCard) return;                    // 卡片自己清的，别反过来清掉 statFilter
+      if (val === 'running') statFilter.value = 'running';
+      else if (val === 'exited') statFilter.value = 'stopped';
+      else statFilter.value = '';
+    });
     // 按 id 合并容器列表：保留行对象引用与行内临时状态（_loading/_deleting），
     // 只更新变化的字段。整表替换会让 Element 表格重建行、看起来在"跳"，
     // 自动刷新这种高频调用尤其明显。
